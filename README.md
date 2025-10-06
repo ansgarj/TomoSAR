@@ -80,7 +80,7 @@ The **CLI tools** are intended to provide a toolbox for the most common or predi
 ### Core CLI Tools
 These are the core tools for a drone processing workflow:
 1. `tomotest`: used for various tests
-	1. `tomotest binaries`: looks in `PATH` for the necessary binaries and performs a minimal test for GNSS processing
+	1. `tomotest binaries`: looks in `PATH` for the necessary binaries and performs a minimal test for GNSS processing (the latter under implementation)
 	2. `tomotest ppp`: tests base station PPP performance against ground truth as given in a `mocoref.moco` file
 2. `tomoprocess`: used for all things processing
 	1. `tomoprocess dir`: **NOT IMPLEMENTED** directly generates a processing directory from a [Data Directory](#data-directories). It will identify what files are present, if necessary generate a `mocoref.moco` file from a CSV file using `mocoref` or if necessary subsititute for a missing mocoref data by running `ppp` on the GNSS base station observation file, or subsitute for missing GNSS base station files by downloading rinex files from _Swepos_ using `swepos`. Then it will copy all necessary files into a processing directory located in `../../Processing/{name}_{today}` where `{name}` is the name of the data directory and `{today}` is the date when the processing directory was generated (for tracking different processings). The generated directory will have the correct file structure for **Radaz** functions. Finally `process-dir` initiates `preprocess` in the processing directory.
@@ -158,3 +158,11 @@ yyyy-mm-dd-HH-MM-SS-filename_processing-time.tomo/
 |-- ...
 ```
 ## Collaboration
+To avoid any conflict and to help me properly manage the module, **always create your own branch** when working on editing code (as long as this repository is private I cannot enforce this via GitHub):
+1. `git checkout -b feature/my-branch` (here _feature_ is a descriptive flag to signal a feature addition, but could be anything or nothing and _my-branch_ is a name for this particular branch)
+2. Edit files, add content, et.c.
+3. `git add .` inside the local repository
+4. `git commit -m "Write a description here"`
+5. `git push origin feature/my-branch` (or just `git push feature/my-branch` after the branch is already tracked)
+## License
+This project is licensed under the BSD 3-Clause License – see the LICENSE file for details.
