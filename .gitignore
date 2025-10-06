@@ -1,0 +1,24 @@
+# Python virtual environment
+.venv/
+
+# Byte-compiled / cache files
+__pycache__/
+
+# JetBrains IDEs
+.idea/
+
+# VS Code settings
+.vscode/
+
+# Obsidian vault settings
+.obsidian/
+
+# macOS system files
+.DS_Store
+
+# Syncthing files
+.stfolder/
+
+# Temporary files
+*.tmp
+*.temp

@@ -1,0 +1,68 @@
+[
+	{
+		"Name": ["convbin", "rnx2rtkp"],
+		"Usage": "GNSS data processing",
+		"Source": "https://github.com/rinex20/RTKLIB-demo5",
+		"Used_by": {
+			"module": [
+				"tomosar.fetch_swepos()"
+			],
+			"scripts": [
+				"fetch_swepos",
+				"compare_pos"
+			]
+		}
+	},
+    {
+    	"Name": "crx2rnx",
+    	"Usage": "Unpacking .crx files to .rnx files",
+    	"Source": "https://terras.gsi.go.jp/ja/crx2rnx.html",
+    	"Used_by": {
+			"module": [
+				"tomosar.gnss.fetch_swepos_files()",
+				"tomosar.fetch_swepos()"
+    		],
+			"scripts": [
+				"fetch_swepos"
+			]
+		}
+    },
+    {
+    	"Name": "gfzrnx",
+    	"Usage": "Merging .rnx files",
+    	"Source": "https://gnss.gfz.de/services/gfzrnx",
+    	"Used_by": {
+			"module": [
+				"tomosar.gnss.unpack_and_merge_rinex()",
+				"tomosar.fetch_swepos()"
+    		],
+			"scripts": [
+				"fetch_swepos"
+			]
+		}
+    },
+	{
+		"Name": "glab",
+		"Usage": "Station PPP",
+		"Source": "https://gage.upc.edu/en/learning-materials/software-tools/glab-tool-suite-links/glab-download",
+		"Used_by": {
+			"module": [
+				"tomosar.station_ppp()"
+    		],
+			"scripts": [
+				"station_ppp"
+			]
+		}
+	},
+	{
+		"Name": "unimoco",
+		"Usage": "Integrating IMU and GNSS",
+		"Source": "Radaz",
+		"Used_by": {
+			"module": [
+				"tomosar"
+			]
+		}
+	}
+]
+
