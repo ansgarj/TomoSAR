@@ -1,7 +1,21 @@
 [
 	{
-		"Name": ["convbin", "rnx2rtkp"],
-		"Usage": "GNSS data processing",
+		"Name": "convbin",
+		"Usage": "GNSS binary format conversion to RINEX",
+		"Source": "https://github.com/rinex20/RTKLIB-demo5",
+		"Used_by": {
+			"module": [
+				"tomosar.fetch_swepos()"
+			],
+			"scripts": [
+				"fetch_swepos",
+				"compare_pos"
+			]
+		}
+	},
+	{
+		"Name": "rnx2rtkp",
+		"Usage": "GNSS RTK post processing",
 		"Source": "https://github.com/rinex20/RTKLIB-demo5",
 		"Used_by": {
 			"module": [

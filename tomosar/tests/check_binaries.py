@@ -5,7 +5,7 @@ from tomosar.utils import require_binary
 
 # Functions to check all dependencies
 def load_dependencies():
-    path = files("tomosar.config").joinpath("dependencies.json")
+    path = files("tomosar.setup").joinpath("dependencies.json")
     with open(path) as f:
         return json.load(f)
 
