@@ -1,5 +1,5 @@
 # README
-This repository contains the `tomosar` python module, which also provides a selection of [[#usage|CLI tools]] that can be run directly from the terminal. It can be installed into your  `Python` environment via `pip`.  You can either **clone** the repository and install it as a development module (`-e`), this is the route suggested below, or you can install it directly from the repository:
+This repository contains the `tomosar` python module, which also provides a selection of [Core CLI Tools](#Core%20CLI%20Tools) that can be run directly from the terminal. It can be installed into your  `Python` environment via `pip`.  You can either **clone** the repository and install it as a development module (`-e`), this is the route suggested below, or you can install it directly from the repository:
 ```sh
 pip install git+https://github.com/ansgarj/TomoSAR.git
 ```
