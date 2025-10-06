@@ -27,10 +27,11 @@ python install -r requirements.txt
 pip install -e ./TomoSAR
 ```
 
-In the above example the Python virtual environment is created inside a `.venv` folder inside the `TomoSar` project directory. I find this helpful to contain the project in one directory, but if you plan to `git push` changes you must also create a `.gitignore` file inside the `TomoSar` directory containing e.g.:
+In the above example the Python virtual environment is created inside a `.venv` folder inside the `TomoSar` project directory. I find this helpful to contain the project in one directory. **Note**: if you use any other directory name then you must add this folder to the `.gitignore` file, e.g.:
 ```sh
 # Python virtual environment
 .venv/
+my-venv/ 
 
 # Byte-compiled / cache files
 __pycache__/
