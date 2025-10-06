@@ -77,6 +77,9 @@ The `tomosar` module is a work-in-progress to provide a one-stop toolbox for our
 
 The **CLI tools** are intended to provide a toolbox for the most common or predicted needs, the idea being that unless you are working on your own project with something not integrated into the CLI tools, you can use the module directly from the terminal by running a command without having to enter into Python and importing the module.  All tools can be called with `--help` for some basic syntax. 
 
+### Environment Variables
+The following environment variables are used by the `tomosar` module to locate files that are kept _only locally_ for memory reasons: `TOMOMASKS` (used to locate `.shp` masks), `TOMODEMS` (used to locate `.tif` files that provide DEM:s) and `TOMOCANOPIES` (used to locate `.tif` files that provide DSM:s used to identify **canopy** ). If not set, `tomosar` will default to using only the user provided folder (see documentation). It is recommended to set the variables in order to avoid needing to track them manually. 
+
 ### Core CLI Tools
 These are the core tools for a drone processing workflow:
 1. `tomotest`: used for various tests

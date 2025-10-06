@@ -152,7 +152,7 @@ def find_dem(user_dem: str = "", dem_type: str = "ground") -> Path:
     Returns:
         str: Path to the DEM .vrt file.
     """
-    env_var = "DEMS_GROUND" if dem_type == "ground" else "DEMS_CANOPY"
+    env_var = "TOMODEMS" if dem_type == "ground" else "TOMOCANOPIES"
     
     if not user_dem:
         dem_paths = [Path(p) for p in os.getenv(env_var, ".").split(os.pathsep)]
