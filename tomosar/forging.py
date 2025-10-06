@@ -162,7 +162,7 @@ def generate_tomograms(band_groups, flight_infos, moco_cuts,
             try:
                 with open(flight_infos[key[0]], 'r') as f:
                     data = json.load(f)
-                    tomo_scene.parameters = data['Spirals'][key[1]]
+                    tomo_scene.info = data['Spirals'][key[1]]
             except (KeyError, TypeError) as e:
                 warn(f"Spiral ID {key[1]} not found in flight info for {key[0]}: {e}")
             except json.JSONDecodeError as e:

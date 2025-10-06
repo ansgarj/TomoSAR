@@ -1259,7 +1259,7 @@ class TomoScene:
     date: datetime = None
     spiral: int = None
     tomograms: Dict[str, TomoInfo] = field(default_factory=dict)
-    parameters: Dict[str, float] = field(default_factory=dict)
+    info: Dict[str, float] = field(default_factory=dict)
     moco: pd.DataFrame = field(default_factory=pd.DataFrame)
     _model: SARModel = None
     
@@ -1294,7 +1294,7 @@ class TomoScene:
         new_scene = TomoScene(id=self.id, date=self.date, spiral=self.spiral)
         for band, tomos in self.items():
             new_scene[band] = tomos.copy()
-        new_scene.parameters = self.parameters.copy()
+        new_scene.info = self.info.copy()
         new_scene.moco = self.moco.copy()
         new_scene._model = self._model.copy()
         return new_scene
@@ -1315,17 +1315,17 @@ class TomoScene:
         tomo_scene = cls(id=path.stem)
         
         # Construct the full path to the SAR parameters file
-        sar_params_file = path / 'sar_parameters.json'
-        if not sar_params_file.exists():
-            raise FileNotFoundError(f"SAR parameters file '{sar_params_file}' not found in the .tomo directory.")
+        info_file = path / 'flight_info.json'
+        if not info_file.exists():
+            raise FileNotFoundError(f"Flight info file '{info_file}' not found in the .tomo directory.")
         # Load the SAR parameters
-        with open(sar_params_file, 'r') as f:
-            sar_parameters = json.load(f)
+        with open(info_file, 'r') as f:
+            flight_info = json.load(f)
 
         # Store SAR parameters
-        tomo_scene.date = datetime.fromisoformat(sar_parameters['date'])
-        tomo_scene.spiral = sar_parameters['spiral']
-        tomo_scene.parameters = sar_parameters['parameters']
+        tomo_scene.date = datetime.fromisoformat(flight_info['date'])
+        tomo_scene.spiral = flight_info['spiral']
+        tomo_scene.info = flight_info['info']
 
         # Construct the full path to the .moco cut CSV file
         moco_file = path / 'moco_cut.csv'
@@ -1356,11 +1356,11 @@ class TomoScene:
         tomo_dir.mkdir(exist_ok=True)
 
         # Save SAR parameters
-        with open(tomo_dir / 'sar_parameters.json', 'w') as f:
+        with open(tomo_dir / 'flight_info.json', 'w') as f:
             json.dump({
                 'date': self.date.isoformat(timespec='seconds'),
                 'spiral': self.spiral,
-                'parameters': self.parameters
+                'info': self.info
                 }, f, indent=4)
 
         # Save .moco cut explicitly as .csv
@@ -1800,8 +1800,8 @@ def tomoload(path: str = '.', cached: bool = True, npar: int = os.cpu_count()) -
     Loads TomoScene instances from .tomo directories, collecting them into a TomoScenes if multple are found.
     """
     # yyyy-mm-dd-HH-MM-SS-filename_processing-time.tomo/
-    #   |-- sar_parameters.json
-    #   |-- binned_sar.csv
+    #   |-- flight_info.json
+    #   |-- moco_cut.csv
     #   |-- phh
     #   |    |-- processing_parameters.json
     #   |    |-- raw_tomogram.tif
