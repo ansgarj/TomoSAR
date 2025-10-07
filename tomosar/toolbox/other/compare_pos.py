@@ -4,8 +4,9 @@ import argparse
 import numpy as np
 import matplotlib.pyplot as plt
 from pathlib import Path
-import subprocess
 import json
+
+from tomosar import run
 
 def read_pos_file(filepath):
     with open(filepath, 'r') as f:
@@ -115,9 +116,8 @@ def main():
     if args.sbas:
         cmd.append(sbs_path)
     if not pos1_path.exists() or args.force:
-        print(f"{base1_obs} SPP ...")
         print(*cmd)
-        subprocess.run(cmd)
+        run(cmd)
     # Read results
     coords1, q1, t1 = read_pos_file(pos1_path)
     # Display Q=1 percentage
@@ -138,8 +138,8 @@ def main():
         cmd.append(sbs_path)
     # Process second base
     if not pos2_path.exists() or args.force:
-        print(f"{base2_obs} SPP ...")
-        subprocess.run(cmd)
+        print(*cmd)
+        run(cmd)
 
     # Read results
     coords2, q2, t2 = read_pos_file(pos2_path)

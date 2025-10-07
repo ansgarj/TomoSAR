@@ -1,25 +1,24 @@
 import json
-from importlib.resources import files
 
-from tomosar.utils import require_binary
+from tomosar.binaries import require_binary, load_dependencies
 
 # Functions to check all dependencies
-def load_dependencies():
-    path = files("tomosar.setup").joinpath("dependencies.json")
-    with open(path) as f:
-        return json.load(f)
-
 def check_required_binaries():
     deps = load_dependencies()
     missing = []
-    for dep in deps:
+    for name, dep in deps.items():
         try:
             hint = json.dumps(dep, indent=4)
-            require_binary(dep["Name"], install_hint=hint)
+            require_binary(name, install_hint=hint)
         except RuntimeError as e:
             print(f"[Missing] {e}")
             missing.append(dep["Name"])
     if missing:
         print(f"{len(missing)} missing binaries: {missing}")
+        return
     else:
         print("All required binaries are available.")
+        _test_gnss()
+
+def _test_gnss():
+    pass

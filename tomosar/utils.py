@@ -36,16 +36,6 @@ def warn(message):
     lineno = frame.f_lineno
     print(f"{filename}:{lineno}: {message}")
 
-# Check if required binary is installed
-def require_binary(name: str, install_hint: str = None):
-    path = shutil.which(name)
-    if path is None:
-        msg = f"Required binary '{name}' not found in PATH."
-        if install_hint:
-            msg += f"\n{install_hint}"
-        raise RuntimeError(msg)
-    return path
-
 # Load interactive console
 def interactive_console(var_dict: dict) -> None:
     pink = "\033[95m"

@@ -8,46 +8,47 @@ from datetime import datetime
 from pathlib import Path
 
 from tomosar import ImageInfo, TomoScenes, interactive_console
-from tomosar.forging import tomoforge as run_tomoforge
+from tomosar.forging import tomoforge
 
 @click.command()
 @click.argument("paths", nargs=-1, type=click.Path(exists=True, path_type=Path))
-@click.option("--single", is_flag=True, help="Process 1-look data in interferometric bands.")
-@click.option("--nopair", is_flag=True, help="Avoid processing 2-look data in interferometric bands.")
-@click.option("--RR", is_flag=True, help="Estimate RR and SSF in multilooked tomogram.")
-@click.option("--fused", is_flag=True, help="Process only fused tomograms.")
-@click.option("--sub", is_flag=True, help="Process only subsurface tomograms.")
-@click.option("--sup", is_flag=True, help="Process only supersurface tomograms.")
-@click.option("--canopy", is_flag=True, help="Process only canopy tomograms.")
-@click.option("--phh", is_flag=True, help="Only process files from P-band.")
-@click.option("--lxx", is_flag=True, help="Only process files from L-band.")
-@click.option("--lhh", is_flag=True)
-@click.option("--lvv", is_flag=True)
-@click.option("--lhv", is_flag=True)
-@click.option("--lvh", is_flag=True)
-@click.option("--cvv", is_flag=True)
-@click.option("--load", is_flag=True, help="Load generated tomogram scenes into an interactive Python console.")
-@click.option("-o", "--out", type=click.Path(path_type=Path), default=".", help="Output directory.")
-@click.option("-m", "--masks", type=str, default="", help="Folder containing shapefile masks.")
-@click.option("-n", "--npar", type=int, default=os.cpu_count(), help="Number of parallel threads.")
-@click.option("--folder", type=str, default=None)
-@click.option("-d", "--date", type=str, default=None)
-@click.option("-t", "--time", type=str, default=None)
-@click.option("-s", "--spiral", type=int, default=None)
-@click.option("-w", "--width", type=float, default=None)
-@click.option("-r", "--res", type=float, default=None)
-@click.option("-f", "--refr", type=float, default=None)
-@click.option("--lat", type=float, default=None)
-@click.option("--lon", type=float, default=None)
-@click.option("--thresh", type=float, default=None)
-@click.option("--smo", type=float, default=None)
-@click.option("--ham", type=float, default=None)
-@click.option("--squint", type=float, default=None)
-@click.option("--text", type=str, default=None)
-@click.option("--DC", type=float, default=None)
-@click.option("--DL", type=float, default=None)
-@click.option("--HC", type=float, default=None)
-@click.option("--HV", type=float, default=None)
+@click.option("-o", "--out", type=click.Path(path_type=Path), default=".", help="Output directory (default: '.')")
+@click.option("-t", "--tag", type=str, default="", flag_value=None, help="Tag output .tomo directory with an extra string (default: latest slice processing date)")
+@click.option("--single", is_flag=True, help="Process 1-look data in interferometric bands")
+@click.option("--nopair", is_flag=True, help="Avoid processing 2-look data in interferometric bands")
+@click.option("--RR", is_flag=True, help="Estimate RR and SSF in multilooked tomogram")
+@click.option("--fused", is_flag=True, help="Process only fused tomograms")
+@click.option("--sub", is_flag=True, help="Process only subsurface tomograms")
+@click.option("--sup", is_flag=True, help="Process only supersurface tomograms")
+@click.option("--canopy", is_flag=True, help="Process only canopy tomograms")
+@click.option("--phh", is_flag=True, help="Only process files from P-band")
+@click.option("--lxx", is_flag=True, help="Only process files from L-band")
+@click.option("--lhh", is_flag=True, help="Only process L-band files with HH-pol")
+@click.option("--lvv", is_flag=True, help="Only process L-band files with VV-pol")
+@click.option("--lhv", is_flag=True, help="Only process L-band files with HV-pol")
+@click.option("--lvh", is_flag=True, help="Only process L-band files with VH-pol")
+@click.option("--cvv", is_flag=True, help="Only process files from C-band")
+@click.option("--load", is_flag=True, help="Load generated tomogram scenes into an interactive Python console")
+@click.option("-m", "--masks", type=str, default="", help="Folder containing shapefile masks (in addition to TOMOMASKS)")
+@click.option("-n", "--npar", type=int, default=os.cpu_count(), help="Number of parallel threads")
+@click.option("--folder", type=str, default=None, help="Filter all files not in the provided folder")
+@click.option("-d", "--date", type=str, default=None, help="Filter all files where the flight date does not match")
+@click.option("-t", "--time", type=str, default=None, help="Filter all files where the flight time does not match")
+@click.option("-s", "--spiral", type=int, default=None, help="Filter all files where the spiral ID does not match")
+@click.option("-w", "--width", type=float, default=None, help="Filter all files where the processed width does not match")
+@click.option("-r", "--res", type=float, default=None, help="Filter all files where the processing resolution does not match")
+@click.option("-f", "--refr", type=float, default=None, help="Filter all files where the refractive index does not match")
+@click.option("--lat", type=float, default=None, help="Filter all files where the central latitude does not match")
+@click.option("--lon", type=float, default=None, help="Filter all files where the central longitude does not match")
+@click.option("--thresh", type=float, default=None, help="Filter all files where the processing threshold does not match")
+@click.option("--smo", type=float, default=None, help="Filter all files where the smoothing parameter does not match")
+@click.option("--ham", type=float, default=None, help="Filter all files where the Hamming window parameter does not match")
+@click.option("--squint", type=float, default=None, help="Filter all files where the squint parameter does not match")
+@click.option("--text", type=str, default=None, help="Filter all files which do not contain a matching text tag")
+@click.option("--DC", type=float, default=None, help="Filter all files where DC parameter does not match")
+@click.option("--DL", type=float, default=None, help="Filter all files where the DL parameter does not match")
+@click.option("--HC", type=float, default=None, help="Filter all files where the HC parameter does not match")
+@click.option("--HV", type=float, default=None, help="Filter all files where the HV parameter does not match")
 def forge(paths, single, nopair, RR, fused, sub, sup, canopy,
          phh, lxx, lhh, lvv, lhv, lvh, cvv, load,
          out, masks, npar, folder, date, time, spiral, width, res, refr,
@@ -84,7 +85,7 @@ def forge(paths, single, nopair, RR, fused, sub, sup, canopy,
     )
 
     # Dispatch processing
-    scenes = run_tomoforge(
+    scenes = tomoforge(
         paths=paths, filter=filter, single=single, nopair=nopair, RR=RR,
         fused=fused, sub=sub, sup=sup, canopy=canopy,
         masks=masks, npar=npar, out=out

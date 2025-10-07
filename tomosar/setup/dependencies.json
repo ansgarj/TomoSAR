@@ -1,6 +1,5 @@
-[
-	{
-		"Name": "convbin",
+{
+	"convbin": {
 		"Usage": "GNSS binary format conversion to RINEX",
 		"Source": "https://github.com/rinex20/RTKLIB-demo5",
 		"Used_by": {
@@ -13,8 +12,7 @@
 			]
 		}
 	},
-	{
-		"Name": "rnx2rtkp",
+	"rnx2rtkp": {
 		"Usage": "GNSS RTK post processing",
 		"Source": "https://github.com/rinex20/RTKLIB-demo5",
 		"Used_by": {
@@ -27,8 +25,7 @@
 			]
 		}
 	},
-    {
-    	"Name": "crx2rnx",
+    "crx2rnx": {
     	"Usage": "Unpacking .crx files to .rnx files",
     	"Source": "https://terras.gsi.go.jp/ja/crx2rnx.html",
     	"Used_by": {
@@ -41,8 +38,7 @@
 			]
 		}
     },
-    {
-    	"Name": "gfzrnx",
+    "gfzrnx": {
     	"Usage": "Merging .rnx files",
     	"Source": "https://gnss.gfz.de/services/gfzrnx",
     	"Used_by": {
@@ -55,8 +51,7 @@
 			]
 		}
     },
-	{
-		"Name": "glab",
+	"glab": {
 		"Usage": "Station PPP",
 		"Source": "https://gage.upc.edu/en/learning-materials/software-tools/glab-tool-suite-links/glab-download",
 		"Used_by": {
@@ -68,8 +63,7 @@
 			]
 		}
 	},
-	{
-		"Name": "unimoco",
+	"unimoco": {
 		"Usage": "Integrating IMU and GNSS",
 		"Source": "Radaz",
 		"Used_by": {
@@ -78,5 +72,5 @@
 			]
 		}
 	}
-]
+}
 

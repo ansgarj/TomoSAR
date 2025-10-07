@@ -43,10 +43,10 @@ tomotest = "tomosar.tests.tomotest:tomotest"
 tomoload = "tomosar.toolbox.tomoload:tomoload"
 tomoprocess = "tomosar.toolbox.tomoprocess:tomoprocess"
 # Dev
-inspect-out = "tomosar.toolbox.inspect_out:main"
-rnx-info = "tomosar.toolbox.rnx_info:main"
+inspect-out = "tomosar.toolbox.other.inspect_out:main"
+rnx-info = "tomosar.toolbox.other.rnx_info:main"
 sliceinfo = "tomosar.toolbox.sliceinfo:main"
-read-imu = "tomosar.toolbox.read_imu:main"
+read-imu = "tomosar.toolbox.other.read_imu:main"
 
 
 [tool.hatch.version]

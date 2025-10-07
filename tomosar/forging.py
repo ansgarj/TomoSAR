@@ -110,7 +110,7 @@ def find_pairs(band_groups, single=False) -> defaultdict[SliceInfo]:
 
 def generate_tomograms(band_groups, flight_infos, moco_cuts, 
                    sub=False, sup=False, canopy=False, fused=False, npar: int = os.cpu_count(), 
-                   RR: bool = True, masks: str = "") -> TomoScenes:
+                   RR: bool = True, masks: str = "", tag: str = "") -> TomoScenes:
     """
     Find and process tomograms based on the provided band groups and flags.
     Returns a TomoList of tomogram information.
@@ -150,12 +150,13 @@ def generate_tomograms(band_groups, flight_infos, moco_cuts,
             tomo_scene[band] = TomoInfo.forge(tomo_slices, multilook=ml_factor, sigma_xi=SIGMA_XI, filter_size=FILTER_SIZE,
                                     point_percentile=POINT_PERCENTILE, point_threshold=POINT_THRESHOLD,
                                     fused=fused, sub=sub, sup=sup, canopy=canopy, npar=npar, RR=RR, masks=masks)
-        
-        # Find latest slice processing time from all tomograms
-        processed = datetime.fromtimestamp(max(linux_time), tz=timezone.utc)
+
+        if tag is None:
+            processed = datetime.fromtimestamp(max(linux_time), tz=timezone.utc)
+            tag = "P" + processed.strftime("%Y%m%d")
 
         # Form ID
-        tomo_scene.id = f"{tomo_scene.date.isoformat(timespec='seconds')}_S:{tomo_scene.spiral}_P:{processed.isoformat(timespec='seconds')}"
+        tomo_scene.id = f"{tomo_scene.date.strftime("%Y-%m-%d-%H-%M-%S")}-{tomo_scene.spiral:02}-{tag}"
 
         # Look for matching flight_info files
         if key[0] in flight_infos:
@@ -196,7 +197,7 @@ def generate_tomograms(band_groups, flight_infos, moco_cuts,
 def tomoforge(*,paths: str|Path | list[str|Path] = ".", filter: ImageInfo = None, 
                 single: bool = False, nopair: bool = False, RR: bool = False,
                 fused: bool = False, sub: bool = False, sup: bool = False, canopy: bool = False,
-                masks: str = None, npar: int = os.cpu_count(), out: str = ".") -> TomoScenes:
+                masks: str = None, npar: int = os.cpu_count(), out: str = ".", tag: str = "") -> TomoScenes:
     """
     Processes tomographic data from .srf or complex .tif files.
 
@@ -247,7 +248,7 @@ def tomoforge(*,paths: str|Path | list[str|Path] = ".", filter: ImageInfo = None
             print(f"\t{len(slices)} slices in {band} band") if band in ['phh', 'cvv'] else None
 
     # Tomographic processing
-    tomo_scenes = generate_tomograms(band_groups, flight_infos=flight_infos, moco_cuts=moco_cuts, 
+    tomo_scenes = generate_tomograms(band_groups, flight_infos=flight_infos, moco_cuts=moco_cuts, tag=tag,
                                  sub=sub, sup=sup, canopy=canopy, fused=fused, npar=npar, RR=RR, masks=masks)
 
     # Save results

@@ -16,6 +16,7 @@ import matplotlib.pyplot as plt
 import json
 
 from .utils import prompt_ftp_login, data_path, gunzip
+from .binaries import run
 
 def extract_rnx_info(file_path):
     """
@@ -221,7 +222,7 @@ def fetch_swepos_files(
                     decompressed_path = gunzip(output_dir / filename)
                     decompressed_path = (output_dir / filename).with_suffix('')  # removes .gz
                     if decompressed_path.suffix == '.crx':
-                        subprocess.run(["crx2rnx", "-d", str(decompressed_path)], check=True)
+                        run(["crx2rnx", "-d", str(decompressed_path)])
                 else:
                     tqdm.write(f"Failed: {filename}")
                     failed += 1
@@ -257,7 +258,7 @@ def merge_swepos_rinex(data_dir):
     if rnx_files:
         merged_obs = data_path.parent / _generate_merged_filename(rnx_files)
         print(f"Merging observation files > {merged_obs}", flush=True)
-        subprocess.run(["gfzrnx", "-q", "-finp"] + [str(f) for f in rnx_files] + ["-fout", str(merged_obs)], check=True)
+        run(["gfzrnx", "-q", "-finp"] + [str(f) for f in rnx_files] + ["-fout", str(merged_obs)])
 
     print("Merging complete.")
 
@@ -645,7 +646,7 @@ def fetch_swepos(
     nav_path = filepath.with_suffix(".nav")
     obs_path = filepath.with_suffix(".obs")
     if not obs_path.exists() or not nav_path.exists() or not sbs_path.exists():
-        subprocess.run(["convbin", "-r", "ubx", "-od", "-os", "-o", str(obs_path), "-n", str(nav_path), 
+        run(["convbin", "-r", "ubx", "-od", "-os", "-o", str(obs_path), "-n", str(nav_path), 
                         "-s", str(sbs_path), filepath.resolve()])
     tmp_dir = output_dir / "TMP"
    
@@ -782,7 +783,7 @@ def station_ppp(
                         #'--model:recphasecenter',
                     ]
                 print(*cmd)
-                result = subprocess.run(cmd, check=True, text=True, capture_output=True)
+                result = run(cmd)
                 out_path.write_text(result.stdout)
     
     if not out_path.exists():
