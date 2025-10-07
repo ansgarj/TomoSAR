@@ -38,7 +38,7 @@ my-venv/
 # Byte-compiled / cache files
 ...
 ```
-and any other files or subdirectories you do not want to push to GitHub. 
+Also add any other files or subdirectories should not be pushed to GitHub that you keep inside the project directory that I have not added (if any).
 
 **NOTE**:I have a simple shell function that I include into my `.bashrc` file to activate virtual environments by alias e.g.:
 ```sh
@@ -100,11 +100,12 @@ These are the core tools for a drone processing workflow:
 	9. `tomoprocess slice`: **NOT IMPLEMENTED** initiates a _backprojection_ loop to generate all slices for the specified tomogram.
 	10. `tomoprocess forge:` scans paths for slice files and intelligently combines them into [Tomogram Directories](#tomogram-directories)
 3. `tomoload`: used for viewing tomograms, statistics, e.t.c
-	1. **NOT IMPLEMENTED**
+	1. ``tomoload interactive``: loads into an interactive Python console (use instead of having to start Python, importing tomoload from tomosar, and then running tomoload inside Python without autocompletion)
+	2. ...
 
 ### Other CLI tools
 These tools are generated because of development needs, and are not stable. They may change significantly or be removed in future updates (please let me know if you want any to be made stable):
-1. `sliceinfo`: scans a directory for slice files and provides information on them.
+1. `sliceinfo`: scans a directory for slice files and collects them into a `SliceInfo` object, then opens an interactive Python console with the `SliceInfo` object stored under `slices`. 
 2. `compare-pos`: compares the output `.pos` file solutions for RTK processing using two different base station files (includes RTK processing if needed);
 3. `inspect-out`: inspects the results of `tomoprocess ppp`;
 4. `rnx-info`: provides timestamps and approximate location for a RINEX observation file;

@@ -23,6 +23,3 @@ def data() -> None:
 def stats() -> None:
     """Compute tomotest statistics."""
     click.echo("Computing statistics...")
-
-if __name__ == '__main__':
-    tomotest()

@@ -1756,7 +1756,7 @@ def restore_cache(folder: str|Path ='cached_masks') -> dict[str,list[Mask]]:
 ### Orchestrating functions
 def sliceinfo(path: str|Path = '.', filter: ImageInfo = None, read: bool = False,
               npar: int = os.cpu_count()) -> SliceInfo:
-    p = Path(p)
+    p = Path(path)
     if not p.exists:
         raise FileNotFoundError(f"'{path}' not found. Check the path or file permissions.")
 

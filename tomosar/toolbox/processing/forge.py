@@ -7,7 +7,7 @@ import click
 from datetime import datetime
 from pathlib import Path
 
-from tomosar import ImageInfo, TomoScenes
+from tomosar import ImageInfo, TomoScenes, interactive_console
 from tomosar.forging import tomoforge as run_tomoforge
 
 @click.command()
@@ -48,7 +48,7 @@ from tomosar.forging import tomoforge as run_tomoforge
 @click.option("--DL", type=float, default=None)
 @click.option("--HC", type=float, default=None)
 @click.option("--HV", type=float, default=None)
-def tomoforge(paths, single, nopair, RR, fused, sub, sup, canopy,
+def forge(paths, single, nopair, RR, fused, sub, sup, canopy,
          phh, lxx, lhh, lvv, lhv, lvh, cvv, load,
          out, masks, npar, folder, date, time, spiral, width, res, refr,
          lat, lon, thresh, smo, ham, squint, text, DC, DL, HC, HV) -> TomoScenes:
@@ -84,7 +84,7 @@ def tomoforge(paths, single, nopair, RR, fused, sub, sup, canopy,
     )
 
     # Dispatch processing
-    tomo_scenes = run_tomoforge(
+    scenes = run_tomoforge(
         paths=paths, filter=filter, single=single, nopair=nopair, RR=RR,
         fused=fused, sub=sub, sup=sup, canopy=canopy,
         masks=masks, npar=npar, out=out
@@ -92,6 +92,4 @@ def tomoforge(paths, single, nopair, RR, fused, sub, sup, canopy,
 
     print(f"Processing completed in {Time.time() - time_start:.2f} seconds.")
     if load:
-        code.interact(local=locals())
-
-    return tomo_scenes
+        interactive_console({"scenes": scenes})

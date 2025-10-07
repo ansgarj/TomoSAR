@@ -24,6 +24,8 @@ from contextlib import contextmanager
 from typing import Iterator
 import shutil
 import gzip
+import code
+import sys
 
 from .processing import circularize
 
@@ -44,6 +46,27 @@ def require_binary(name: str, install_hint: str = None):
         raise RuntimeError(msg)
     return path
 
+# Load interactive console
+def interactive_console(var_dict: dict) -> None:
+    pink = "\033[95m"
+    reset = "\033[0m"
+    bold = "\033[1m"
+    bold_off = "\033[22m"
+
+    sys.ps1 = f"{pink}>>> {reset}"
+    sys.ps2 = f"{pink}... {reset}"
+
+    print(f"{pink}{bold}Printing loaded variables ...{reset}")
+
+    lines = [
+        f"{pink}{bold}{name}:{bold_off} {value}{reset}"
+        for name, value in var_dict.items()
+    ]
+
+    banner = "\n".join(lines)
+
+    # Launch console with variables available
+    code.interact(banner=banner, local=var_dict)
 
 # Find change points in linear statistics
 def find_inliers(signal, min_samples: int|float = 0.5, residual_threshold: float|None = None,

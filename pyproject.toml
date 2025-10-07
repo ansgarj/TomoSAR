@@ -1,41 +1,57 @@
+[build-system]
+requires = ["hatchling","hatch-vcs","wheel"]
+build-backend = "hatchling.build"
+
 [project]
 name = "tomosar"
-version = "0.1.0"
 description = "Toolbox for tomographic SAR processing from drone data"
 authors = [
-    {name = "Ansgar Jörgenfelt (ansgar.jorgenfelt@slu.se)"}
+    {name = "Ansgar Jörgenfelt", email = "ansgar.jorgenfelt@slu.se"}
 ]
 readme = "README.md"
-requires-python = ">=3.13"
+license = "BSD-3-Clause"
+license-files = ["LICENSE"]
+requires-python = ">=3.9"
 dependencies = [
     "numpy (>=2.3.3,<3.0.0)",
     "pandas (>=2.3.3,<3.0.0)",
     "rasterio (>=1.4.3,<2.0.0)",
     "scipy (>=1.16.2,<2.0.0)",
-    "scikit-learn",
+    "scikit-learn (>=1.7.1,<2.0.0)",
     "matplotlib (>=3.10.6,<4.0.0)",
     "pyproj (>=3.7.2,<4.0.0)",
     "geopandas (>=1.1.1,<2.0.0)",
     "tqdm (>=4.67.1,<5.0.0)",
     "pytz (>=2025.2,<2026.0)",
     "scikit-image (>=0.25.2,<0.26.0)",
-    "shapely (>=2.1.2,<3.0.0)",
-    "xarray (>=2025.9.1,<2026.0.0)",
-    "sympy (>=1.14.0,<2.0.0)"
+    "sympy (>=1.14.0,<2.0.0)",
+    "click (>=8.2.1,<9.0.0)",
+    "threadpoolctl (>=3.6.0,<4.0.0)"
+]
+dynamic=[
+    "version",
+    "urls"
 ]
 
+[project.optional-dependencies]
+dev = ["fawltydeps", "vermin"]
+
 [project.scripts]
+# Core
+tomosar = "tomosar.toolbox.tomosar:tomosar"
 tomotest = "tomosar.tests.tomotest:tomotest"
-fetch-swepos = "tomosar.toolbox.fetch_swepos:main"
+tomoload = "tomosar.toolbox.tomoload:tomoload"
+tomoprocess = "tomosar.toolbox.tomoprocess:tomoprocess"
+# Dev
 inspect-out = "tomosar.toolbox.inspect_out:main"
 rnx-info = "tomosar.toolbox.rnx_info:main"
 sliceinfo = "tomosar.toolbox.sliceinfo:main"
-station-ppp = "tomosar.toolbox.station_ppp:main"
 read-imu = "tomosar.toolbox.read_imu:main"
-tomoforge = "tomosar.toolbox.tomoforge:main"
-tomoload = "tomosar.toolbox.tomoload:main"
-trackfinder = "tomosar.toolbox.trackfinder:main"
 
-[build-system]
-requires = ["poetry-core>=2.0.0,<3.0.0"]
-build-backend = "poetry.core.masonry.api"
+
+[tool.hatch.version]
+source = "vcs"
+fallback-version = "0.0.0"
+
+[tool.hatch.version.raw-options]
+version_scheme = "no-guess-dev"
