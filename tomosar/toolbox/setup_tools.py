@@ -8,7 +8,7 @@ from pathlib import Path
 from tomosar.utils import warn
 from tomosar.binaries import check_required_binaries, run
 
-PACKAGE_PATH = os.path.dirname(tomosar.__file__)
+PACKAGE_PATH = Path(tomosar.__file__)
 PROJECT_PATH = Path(tomosar.__file__).parent.parent
 
 def pyproject_changed() -> bool:
