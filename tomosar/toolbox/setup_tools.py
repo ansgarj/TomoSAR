@@ -15,15 +15,24 @@ def pyproject_changed() -> bool:
     """Checks whether pyproject.toml was changed in the last merge (pull)"""
     try:
         # Run the git diff-tree command
-        result =run(["git", "diff-tree", "-r", "--name-only", "--no-commit-id", "ORIG_HEAD", "HEAD"])
+        result = run(["git", "diff-tree", "-r", "--name-only", "--no-commit-id", "ORIG_HEAD", "HEAD"])
         
         # Check if pyproject.toml is in the output
         changed_files = result.stdout.splitlines()
         return "pyproject.toml" in changed_files
 
     except RuntimeError as e:
-        warn(e)
-        return False
+        try: 
+            # Run git diff-tree against last commit instead
+            result =run(["git", "diff-tree", "-r", "--name-only", "--no-commit-id", "HEAD~1", "HEAD"])
+
+            # Check if pyproject.toml is in the output
+            changed_files = result.stdout.splitlines()
+            return "pyproject.toml" in changed_files
+        
+        except RuntimeError as e:
+            warn(e)
+            return False
 
 def warm_cache():
     """Pre-warm __pycache__ by compiling all modules."""
@@ -39,6 +48,8 @@ def setup():
         shutil.copy2(PROJECT_PATH / "setup" / "post-merge", post_merge_path)
     if pyproject_changed():
         run(["pip", "install", "-e", PROJECT_PATH])
+    else:
+        print("Installation up to speed, no action required.")
     check_required_binaries()
     warm_cache()
 
