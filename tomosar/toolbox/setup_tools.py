@@ -8,7 +8,7 @@ from pathlib import Path
 from tomosar.utils import warn
 from tomosar.binaries import check_required_binaries, run
 
-PACKAGE_PATH = Path(tomosar.__file__)
+PACKAGE_PATH = Path(tomosar.__file__).parent
 PROJECT_PATH = Path(tomosar.__file__).parent.parent
 
 def pyproject_changed() -> bool:
@@ -34,9 +34,9 @@ def warm_cache():
 @click.command()
 def setup():
     """Performs TomoSAR setup"""
-    post_merge_path = PACKAGE_PATH / ".git" / "hooks" / "post-merge"
+    post_merge_path = PROJECT_PATH / ".git" / "hooks" / "post-merge"
     if not post_merge_path.exists():
-        shutil.copy2(PACKAGE_PATH / "setup" / "post-merge", post_merge_path)
+        shutil.copy2(PROJECT_PATH / "setup" / "post-merge", post_merge_path)
     if pyproject_changed():
         run(["pip", "install", "-e", PROJECT_PATH])
     check_required_binaries()

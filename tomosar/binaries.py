@@ -19,14 +19,17 @@ def run(cmd: str | list):
             f"stderr:\n{e.stderr}"
         ) from e
 
-def require_binary(name: str) -> str:
+def require_binary(name: str, hint: str|None = None) -> str:
     try:
         dep = load_dependencies()[name]
     except:
         raise RuntimeError(f"Failed to find required binary '{name}' in tomosar.setup.dependencies.json")
     path = shutil.which(name)
     if path is None:
-        raise RuntimeError(f"Required binary '{name}' not found in PATH.\n\033[1mSource\033[22m: {dep["Source"]}")
+        if not hint:
+            raise RuntimeError(f"Required binary '{name}' not found in PATH.\n\033[1mSource\033[22m: {dep["Source"]}")
+        else:
+            raise RuntimeError(f"Required binary '{name}' not found in PATH.\n{hint}")
     return path
 
 def load_dependencies() -> dict[str,dict]:
@@ -40,10 +43,10 @@ def check_required_binaries() -> None:
     for name, dep in deps.items():
         try:
             hint = json.dumps(dep, indent=4)
-            require_binary(name, install_hint=hint)
+            require_binary(name, hint=hint)
         except RuntimeError as e:
             print(f"[Missing] {e}")
-            missing.append(dep["Name"])
+            missing.append(name)
     if missing:
         print(f"{len(missing)} missing binaries: {missing}")
         return
