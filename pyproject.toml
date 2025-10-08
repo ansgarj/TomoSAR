@@ -8,6 +8,7 @@ description = "Toolbox for tomographic SAR processing from drone data"
 authors = [
     {name = "Ansgar Jörgenfelt", email = "ansgar.jorgenfelt@slu.se"}
 ]
+keywords = ["SAR", "tomographic", "tomogram", "Radaz", "RD350", "radar", "microwaves", "processing"]
 readme = "README.md"
 license = "BSD-3-Clause"
 license-files = ["LICENSE"]
@@ -30,7 +31,6 @@ dependencies = [
 ]
 dynamic=[
     "version",
-    "urls"
 ]
 
 [project.optional-dependencies]
@@ -42,6 +42,8 @@ tomotest = "tomosar.tests.tomotest:tomotest"
 tomoview = "tomosar.toolbox.tomoview:tomoview"
 tomoprocess = "tomosar.toolbox.tomoprocess:tomoprocess"
 
+[project.urls]
+repository = "https://github.com/ansgarj/TomoSAR.git"
 
 [tool.hatch.version]
 source = "vcs"

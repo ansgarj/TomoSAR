@@ -23,11 +23,13 @@ git clone https://github.com/ansgarj/TomoSAR.git
 cd TomoSAR
 python3 -m venv .venv
 source .venv/bin/activate
-python install -r requirements.txt
-pip install -e ./TomoSAR
+pip install -e .
+tomosar setup
 ```
 
-In the above example the Python virtual environment is created inside a `.venv` folder inside the `TomoSar` project directory. I find this helpful to contain the project in one directory. **Note**: do not use another name for the virtual environment, but _if you do_ then you must add this folder to the `.gitignore` file, e.g.:
+**NOTE**: running `tomosar setup` is not strictly required, but will install a Git _hook_ for you, check if all required binaries are present and help you if not, and pre-warm the \_\_pycache\_\_ (see more [below](#cli-tools))
+
+In the above example the Python virtual environment is created inside a `.venv` folder inside the `TomoSar` project directory. I find this helpful to contain the project in one directory. **Note**: do _not_ use another name for the virtual environment if placed inside the project directory, but _if you do_ then you must add this folder to the `.gitignore` file, e.g.:
 ```sh
 ...
 
@@ -61,12 +63,12 @@ activate() {
 ```
 That way I can activate the virtual environment by running e.g. `activate sar` from any folder (say, where I have the radar data). 
 
-### Post-Install
-The `tomosar` module relies on some 3rd party software for GNSS processing. It is recommended to make sure you have everything set up before starting to use the toolbox, even though it is not _strictly_ necessary. To facilitate this there is CLI tool that you can run:
+### Required Binaries
+The `tomosar` module relies on some 3rd party software for GNSS processing. It is recommended to make sure you have everything set up before starting to use the toolbox, even though it is not _strictly_ necessary. If you run `tomosar setup` as suggested above, this is already done. Otherwise you can run
 ```sh
-tomotest binaries
+tomosar dependencies
 ```
-This will check if there are any binaries in your `PATH` with the correct names, but not actually test if it is the correct binaries, and provide helpful information if not (including source html links where applicable). The required binaries are:
+to perform the check independently. This will check if there are any binaries in your `PATH` with the correct names, but not actually test if it is the correct binaries, and provide helpful information if not (including source html links where applicable). The required binaries are:
 1. `convbin` from `rtklib`
 2. `rnx2rtkp` from `rtklib`
 3. `crx2rnx` from GSI Japan
@@ -79,19 +81,22 @@ This will check if there are any binaries in your `PATH` with the correct names,
 **NOTE**: I use the [demo5](https://github.com/rinex20/RTKLIB-demo5) version of `rtklib`, and this is the one `tomotest binaries` will suggest installing if it finds no `convbin` or `rnx2rtkp` binary, **but** it _should_ run on standard `rtklib` as well.
 
 ## Usage
-The `tomosar` module is a work-in-progress to provide a one-stop toolbox for our tomographic SAR needs. Once installed it can be imported into Python by running `import tomosar`, or you can select submodules or objects as usual  in Python. Currently, the only available documentation is the one present in the code, _but I plan to add separate documentation later._
+The `tomosar` _module_ is a work-in-progress to provide a one-stop toolbox for our tomographic SAR needs. Once installed it can be imported into Python by running `import tomosar`, or you can select submodules or objects as usual  in Python. Currently, the only available documentation is the one present in the code, _but I plan to add separate documentation later._
 
-The **CLI tools** are intended to provide a toolbox for the most common or predicted needs, the idea being that unless you are working on your own project with something not integrated into the CLI tools, you can use the module directly from the terminal by running a command without having to enter into Python and importing the module.  All tools can be called with `--help` for some basic syntax. 
+The [CLI tools](#cli-tools) are intended to provide a toolbox for the most common or predicted needs, the idea being that unless you are working on your own project with something not integrated into the CLI tools, you can use the module directly from the terminal by running a command without having to enter into Python and importing the module.  All tools can be called with `--help` for some basic syntax. 
 
 ### Environment Variables
-The following environment variables are used by the `tomosar` module to locate files that are kept _only locally_ for memory reasons: `TOMOMASKS` (used to locate `.shp` masks), `TOMODEMS` (used to locate `.tif` files that provide DEM:s) and `TOMOCANOPIES` (used to locate `.tif` files that provide DSM:s used to identify **canopy** ). If not set, `tomosar` will default to using only the user provided folder (see documentation). It is recommended to set the variables in order to avoid needing to track them manually. 
+The following environment variables are used by the `tomosar` module to locate files that are kept _only locally_ for memory reasons: `TOMOMASKS` (used to locate `.shp` masks), `TOMODEMS` (used to locate `.tif` files that provide DEM:s) and `TOMOCANOPIES` (used to locate `.tif` files that provide DSM:s used to identify **canopy** ). If not set, `tomosar` will default to using only the user provided folder (see documentation). It is recommended to set the variables in order to avoid needing to track them manually. Note that
+- `TOMOMASKS` _or a user passed substitute_ is **never** required;
+- `TOMODEMS` _or a user passed substitute_ is **required** only when processing slices with a ground reference;
+- `TOMOCANOPIES` _or a user passed substitute_ is **required** only when processing slices with a canopy reference.
 
 ### CLI Tools
-These are the core tools (mostly) for a drone processing workflow:
-1. `tomosar`:  version, help setup and various Python entry points:
+These are the CLI tools provided by the `tomosar` module:
+1. `tomosar`:  version, help, setup and various Python entry points:
 	1. `tomosar version`: prints the current version
 	2. `tomosar help`: prints a help message similar to this README
-	3. `tomosar setup`: installs a Git _hook_ that performs `setup` whenever a successful merge occurs (i.e. on future `git pull` runs, **note**: this is skipped if a `post-merge` Git hook already exists, so you _can_ modify and use your own hooks), then continues setup by checking if the `pyproject.toml` file changed in the last merge and updates the installation if it did, checks if all required binaries are in the `PATH` (in case more were added) and prints helpful information if not, and finally it pre-warms the \_\_pycache\_\_ by compiling the module with all sub-modules and tools.
+	3. `tomosar setup`: installs a Git _hook_ that performs `setup` whenever a successful merge occurs (i.e. on future `git pull` runs, **note**: this is skipped if a `post-merge` Git hook already exists, so you _can_ modify and use your own hooks), then continues setup by checking if the `pyproject.toml` file changed in the last merge (if no merge found it falls back to last commit) and updates the installation if it did, checks if all required binaries are in the `PATH` (in case more were added) and prints helpful information if not, and finally it pre-warms the \_\_pycache\_\_ by compiling the module with all sub-modules and tools.
 	4. `tomosar dependencies`: performs the `PATH` check for required binaries independently of `setup`.
 	5. `tomosar warmup`: pre-warms the \_\_pycache\_\_.
 	6. `tomosar sliceinfo`: scans a directory for slice files and collects them into a `SliceInfo` object, and then opens an interactive Python console with the `SliceInfo` object stored under `slices`. 
@@ -173,7 +178,40 @@ If you want to modify the module or work on features to add, always **create you
 2. Edit files, add content, et.c.
 3. `git add .` inside the local repository
 4. `git commit -m "Write a description here"`
-5. `git push origin feature/my-branch` (or just `git push feature/my-branch` after the branch is already tracked)
+5. `git push origin feature/my-branch`
 6. You can then go to [GitHub](https://github.com/ansgarj/TomoSAR) and make a **pull request** for me to integrate it into the main branch
+
+**NOTE**: to push changes you must set up your identity:
+```sh
+git config --global user.name "Your Name"
+git config --global user.email "your.email@example.com"
+```
+Then set up authentication:
+1. Go to GitHub → Settings → Developer Settings → Personal Access Tokens.
+2. Click **"Generate new token"** (classic or fine-grained).
+3. Select scopes like `repo` and `workflow` (for private repos).
+4. Copy the token and save it securely.
+5. When Git asks for your password during `git push`, **paste the token instead**.
+
+**NOTE**: you can also change to SSH authentication (more advanced)
+1.  Generate an SSH key (if you don't have one):
+```sh
+ssh-keygen -t ed25519 -C "your.email@example.com"
+```
+2. Add your SSH key to the SSH agent (assuming you used default name):
+```sh
+eval "$(ssh-agent -s)"
+ssh-add ~/.ssh/id_ed25519
+```
+3. Add the **public** key to GitHub:
+```sh
+cat ~/.ssh/id_ed25519.pub
+```
+4. Copy the output and past into GitHub → Settings → SSH and GPG keys.
+5. Change your remote URL to SSH:
+```sh
+git remote set-url origin git@github.com:ansgarj/TomoSAR.git
+```
+
 ## License
 This project is licensed under the BSD 3-Clause License – see the LICENSE file for details.

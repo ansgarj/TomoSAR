@@ -1,7 +1,6 @@
 import click
 import compileall
 import tomosar
-import os
 import shutil
 from pathlib import Path
 
@@ -54,7 +53,7 @@ def setup():
     warm_cache()
 
 @click.command()
-def depedencies():
+def dependencies():
     """Scan PATH for required binaries"""
     check_required_binaries()
 
