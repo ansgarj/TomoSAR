@@ -1,10 +1,6 @@
-#!/usr/bin/env python3
 import click
 
-from .processing.trackfinder import trackfinder
-from .processing.forge import forge
-from .processing.station_ppp import ppp
-from .processing.fetch_swepos import swepos
+from .processing_tools import forge, trackfinder, ppp, swepos
 
 @click.group()
 def tomoprocess() -> None:

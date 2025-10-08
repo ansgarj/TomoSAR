@@ -1,5 +1,5 @@
 # README
-This repository contains the `tomosar` python module which is **under development**, which also provides a selection of [Core CLI Tools](#core-cli-tools) that can be run directly from the terminal. It can be installed into your  `Python` environment via `pip`.  You can either **clone** the repository and install it as a development module (`-e`), this is the route suggested below, or you can install it directly from the repository:
+This repository contains the `tomosar` python module which is **under development**, which also provides a selection of [CLI Tools](#core-cli-tools) that can be run directly from the terminal. It can be installed into your  `Python` environment via `pip`.  You can either **clone** the repository and install it as a development module (`-e`), this is the route suggested below, or you can install it directly from the repository:
 ```sh
 pip install git+https://github.com/ansgarj/TomoSAR.git
 ```
@@ -86,13 +86,21 @@ The **CLI tools** are intended to provide a toolbox for the most common or predi
 ### Environment Variables
 The following environment variables are used by the `tomosar` module to locate files that are kept _only locally_ for memory reasons: `TOMOMASKS` (used to locate `.shp` masks), `TOMODEMS` (used to locate `.tif` files that provide DEM:s) and `TOMOCANOPIES` (used to locate `.tif` files that provide DSM:s used to identify **canopy** ). If not set, `tomosar` will default to using only the user provided folder (see documentation). It is recommended to set the variables in order to avoid needing to track them manually. 
 
-### Core CLI Tools
-These are the core tools for a drone processing workflow:
-1. `tomotest`: used for various tests
-	1. `tomotest binaries`: looks in `PATH` for the necessary binaries and performs a minimal test for GNSS processing (the latter under implementation)
-	2. `tomotest ppp`: tests base station PPP performance against ground truth as given in a `mocoref.moco` file
-2. `tomoprocess`: used for all things processing
-	1. `tomoprocess dir`: **NOT IMPLEMENTED** directly generates a processing directory from a [Data Directory](#data-directories). It will identify what files are present, if necessary generate a `mocoref.moco` file from a CSV file using `mocoref` or if necessary subsititute for a missing mocoref data by running `ppp` on the GNSS base station observation file, or subsitute for missing GNSS base station files by downloading rinex files from _Swepos_ using `swepos`. Then it will copy all necessary files into a processing directory located in `../../Processing/{name}_{today}` where `{name}` is the name of the data directory and `{today}` is the date when the processing directory was generated (for tracking different processings). The generated directory will have the correct file structure for **Radaz** functions. Finally `process-dir` initiates `preprocess` in the processing directory.
+### CLI Tools
+These are the core tools (mostly) for a drone processing workflow:
+1. `tomosar`:  version, help setup and various Python entry points:
+	1. `tomosar version`: prints the current version
+	2. `tomosar help`: prints a help message similar to this README
+	3. `tomosar setup`: installs a Git _hook_ that performs `setup` whenever a successful merge occurs (i.e. on future `git pull` runs, **note**: this is skipped if a `post-merge` Git hook already exists, so you _can_ modify and use your own hooks), then continues setup by checking if the `pyproject.toml` file changed in the last merge and updates the installation if it did, checks if all required binaries are in the `PATH` (in case more were added) and prints helpful information if not, and finally it pre-warms the \_\_pycache\_\_ by compiling the module with all sub-modules and tools.
+	4. `tomosar dependencies`: performs the `PATH` check for required binaries independently of `setup`.
+	5. `tomosar warmup`: pre-warms the \_\_pycache\_\_.
+	6. `tomosar sliceinfo`: scans a directory for slice files and collects them into a `SliceInfo` object, and then opens an interactive Python console with the `SliceInfo` object stored under `slices`. 
+	7. `tomosar load`: loads a single [Tomogram Directory](#tomogram-directories) or multiple [Tomogram Directories](#tomogram-directories) into a `TomoScenes` object, and then opens an interactive Python console with the `TomoScenes` object stored under `tomos`. 
+2. `tomotest`: used for various tests
+	1. `tomotest gnss`: **NOT IMPLEMENTED** tests GNSS processing capabilities, ensuring that your binaries work as intended and are compatible with the module.
+	2. `tomotest ppp`: **NOT IMPLEMENTED** tests base station PPP performance against ground truth as given in a `mocoref.moco` file.
+3. `tomoprocess`: used for all things processing
+	1. `tomoprocess init`: **NOT IMPLEMENTED** directly generates a processing directory from a [Data Directory](#data-directories). It will identify what files are present, if necessary generate a `mocoref.moco` file from a CSV file using `mocoref` or if necessary subsititute for a missing mocoref data by running `ppp` on the GNSS base station observation file, or subsitute for missing GNSS base station files by downloading rinex files from _Swepos_ using `swepos`. Then it will copy all necessary files into a processing directory located in `../../Processing/{name}_{today}` where `{name}` is the name of the data directory and `{today}` is the date when the processing directory was generated (for tracking different processings). The generated directory will have the correct file structure for **Radaz** functions. Finally `process-dir` initiates `preprocess` in the processing directory.
 	2. `tomoprocess mocoref`: **NOT IMPLEMENTED** generates a correctly formatted `mocoref.moco` file from a CSV file,  reading the columns named `Longitude`, `Latitude`, `Ellipsoidal height` and `Antenna height` (default column names from _Emlid Reach_) for mocoref data. If multiple lines are present in the CSV files it will by default read the first line (modify by `--line X`). Antenna height can be specified manually, overriding CSV data by `--antenna X`. 
 	3. `tomoprocess ppp`: runs PPP processing on a GNSS base station directory to find its position, updates the rinex header with the correct position and generates a `mocoref.moco` file (**mocoref generation not fully implemented**). In theory this can be _more precise_ than using Emlid with NTRIP but because we don't have exact antenna calibration data for the GNSS we have used (CHCI83) it is limited by manual identification of correct antenna phase offset centers, and **this is done by comparison with Emlid NTRIP measurements**. Thus they should be approximately equivalent.
 	4. `tomoprocess swepos`: downloads and merges the necessary rinex data from the nearest station in the  _Swepos_ network, for any given drone `gnss_logger_dat-[...].bin` file. These file have the correct exact position in the RINEX header, but will be more distant from the flight (longer _baseline_ which can introduce other errors: in testing it is roughly equivalent to using our GNSS with Emlid NTRIP measurement of the position). **Note**: in the process it will use `convbin` to convert the UBX .bin file to RINEX files if this is not done already.
@@ -102,17 +110,9 @@ These are the core tools for a drone processing workflow:
 	8. `tomoprocess tomo`: **NOT IMPLEMENTED** chains `slice` and `forge` to generate a [Tomogram Directory](#tomogram-directories), or content for one. 
 	9. `tomoprocess slice`: **NOT IMPLEMENTED** initiates a _backprojection_ loop to generate all slices for the specified tomogram.
 	10. `tomoprocess forge:` scans paths for slice files and intelligently combines them into [Tomogram Directories](#tomogram-directories)
-3. `tomoload`: used for viewing tomograms, statistics, e.t.c
-	1. ``tomoload interactive``: loads into an interactive Python console (use instead of having to start Python, importing tomoload from tomosar, and then running tomoload inside Python without autocompletion)
-	2. ...
+4. `tomoview`: used for viewing tomograms, statistics, e.t.c
+	1. ...
 
-### Other CLI tools
-These tools are generated because of development needs, and are not stable. They may change significantly or be removed in future updates (please let me know if you want any to be made stable):
-1. `sliceinfo`: scans a directory for slice files and collects them into a `SliceInfo` object, then opens an interactive Python console with the `SliceInfo` object stored under `slices`. 
-2. `compare-pos`: compares the output `.pos` file solutions for RTK processing using two different base station files (includes RTK processing if needed);
-3. `inspect-out`: inspects the results of `tomoprocess ppp`;
-4. `rnx-info`: provides timestamps and approximate location for a RINEX observation file;
-5. `read-imu`: experimentally reads a `imu_logger_dat-[...].bin` file and generates a `.csv` file from it. 
 ### Data Directories
 As a _data directory_ functions anything containing at least the done data. There are no specific requirements on the _internal_ structure. However, if `tomoprocess dir` is to be used to generate _processing directories_, a _data directory_ should be placed inside a containing folder next to a `Processing` folder, e.g.:
 ```

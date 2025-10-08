@@ -434,7 +434,7 @@ def date_to_gps_week(input_date):
     gps_week = delta.days // 7
     return gps_week
 
-def _read_pos_file(filepath: str|Path):
+def read_pos_file(filepath):
     with open(filepath, 'r') as f:
         lines = f.readlines()
 
@@ -450,16 +450,15 @@ def _read_pos_file(filepath: str|Path):
     
 
     # Auto-detect coordinate columns (assumes columns 3–5 are E/N/U or X/Y/Z)
-    if data.shape[1] >= 6:
+    if data.shape[1] >= 5:
         coords = data[:, 2:5]
+        gpst = data[:, 1]
         q = data[:, 5]
+        q = np.sum(q == 1) / len(q) * 100
     else:
         raise ValueError(f"Unexpected format in {filepath}: not enough columns")
     
-    if coords.size == 0 or q.size == 0:
-        raise ValueError(f"{filepath} contained no valid position rows (did the solution terminate with Q=0 for all epochs?)")
-    
-    return coords, q
+    return coords, q, gpst
 
 def read_out_file(file_path: str|Path, verbose: bool = False):
     x, y, z = [], [], []
@@ -793,7 +792,7 @@ def station_ppp(
     pos, _, _ = read_out_file(out_path, verbose=True)
 
     lon, lat, h = Transformer.from_crs("epsg:4978", "epsg:4326", always_xy=True).transform(*approx_pos)
-    print(f"Old header position: lat={lat}, lon={lon}, alt={h}")
+    print(f"Old header position: lat={lat}, lon={lon}, height={h}")
     distance = math.sqrt((pos[0] - approx_pos[0])**2 + (pos[1] - approx_pos[1])**2 + (pos[2] - approx_pos[2])**2)
     print(f"Distance: {distance} m")
     print()

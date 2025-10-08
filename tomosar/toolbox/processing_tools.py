@@ -1,14 +1,79 @@
-#!/usr/bin/env python3
-
+import click
+from pathlib import Path
 import os
 import time as Time
-import code
-import click
-from datetime import datetime
-from pathlib import Path
+import datetime
 
+from tomosar.gnss import fetch_swepos, station_ppp
+from tomosar.trackfinding import trackfinder as run_trackfinder
 from tomosar import ImageInfo, TomoScenes, interactive_console
 from tomosar.forging import tomoforge
+
+@click.command()
+@click.argument("filepath", type=click.Path(exists=True, path_type=Path))
+@click.option("--stations", type=click.Path(exists=True, path_type=Path), default=None, help="Path to the SWEPOS coordinate list CSV")
+@click.option("--downloads", type=int, default=10, help="Max number of parallel downloads (default: 10)")
+@click.option("--attempts", type=int, default=3, help="Max number of attempts for each file (default: 3)")
+@click.option("-o", "--output", type=click.Path(path_type=Path), default="SWEPOS", help="Output directory for SWEPOS RINEX files")
+@click.option("-d", "--dry", is_flag=True, help="Dry run without downloads")
+@click.option("--cont", is_flag=True, help="Continue run after downloads complete")
+@click.option("-n","--nav", is_flag=True, help="Also fetch nav files.")
+def swepos(filepath, stations, downloads, attempts, output, dry, cont, nav) -> None:
+    """Extract GNSS info and find nearest SWEPOS station.
+    Then download files into output directory."""
+    fetch_swepos(
+        filepath=filepath,
+        stations_path=stations,
+        max_downloads=downloads,
+        max_retries=attempts,
+        dry=dry,
+        output_dir=output,
+        cont=cont
+    )
+
+@click.command()
+@click.argument("data_dir", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option("-a", "--atx", type=click.Path(exists=True, path_type=Path), default=None, help="Path to the antenna .atx file")
+@click.option("-r", "--receiver", type=click.Path(exists=True, path_type=Path), default=None, help="Path to the .atx file containing receiver antenna info")
+@click.option("--downloads", type=int, default=10, help="Max number of parallel downloads (default: 10)")
+@click.option("--attempts", type=int, default=3, help="Max number of attempts for each file (default: 3)")
+@click.option("-o", "--output", type=click.Path(path_type=Path), default=None, help="Output directory for SWEPOS rinex files")
+@click.option("-d", "--dry", is_flag=True, help="Dry run without downloads")
+@click.option("--cont", is_flag=True, help="Continue run after downloads complete")
+@click.option("-x", "--header", is_flag=True, default=True, help="Modify OBS file header with new position (default: True)")
+def ppp(data_dir, atx, receiver, downloads, attempts, output, dry, cont, header) -> None:
+    """Extract GNSS info and find nearest SWEPOS station."""
+    station_ppp(
+        data_dir=data_dir,
+        atx_path=atx,
+        antrec_path=receiver,
+        max_downloads=downloads,
+        max_retries=attempts,
+        dry=dry,
+        output_dir=output,
+        cont=cont,
+        header=header
+    )
+
+@click.command()
+@click.argument("path", type=click.Path(exists=True, path_type=Path))
+@click.option("-l", "--linear", type=int, default=None, help="Specify linear track index to modify radar-[...].inf (0 for spiral flights)")
+@click.option("-v", "--verbose", is_flag=True, help="Print detailed output")
+@click.option("-d", "--dry", is_flag=True, help="Don't save or modify files")
+@click.option("-s", "--simple", is_flag=True, help="Skip full analysis")
+@click.option("--dem", type=click.Path(exists=True, path_type=Path), default=None, help="Path to DEM file or folder to combine with DEMS_GROUND")
+@click.option("--npar", type=int, default=None, help="Number of parallel processes (default: CPU count)")
+def trackfinder(path, linear, verbose, dry, simple, dem, npar) -> None:
+    """Run trackfinder on a .moco file."""
+    run_trackfinder(
+        path=path,
+        dem_path=dem,
+        linear=linear,
+        verbose=verbose,
+        dry=dry,
+        simple=simple,
+        npar=npar
+    )
 
 @click.command()
 @click.argument("paths", nargs=-1, type=click.Path(exists=True, path_type=Path))

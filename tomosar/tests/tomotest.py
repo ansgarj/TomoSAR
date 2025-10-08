@@ -1,17 +1,9 @@
-#!/usr/bin/env python3
 import click
-
-from .check_binaries import check_required_binaries
 
 @click.group()
 def tomotest() -> None:
     """Entry point for tomotest utilities."""
     pass
-
-@tomotest.command()
-def binaries() -> None:
-    """Look for required binaries."""
-    check_required_binaries()
 
 # Below are placeholders
 @tomotest.command()

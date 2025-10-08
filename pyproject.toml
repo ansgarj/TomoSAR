@@ -37,16 +37,10 @@ dynamic=[
 dev = ["fawltydeps", "vermin"]
 
 [project.scripts]
-# Core
 tomosar = "tomosar.toolbox.tomosar:tomosar"
 tomotest = "tomosar.tests.tomotest:tomotest"
-tomoload = "tomosar.toolbox.tomoload:tomoload"
+tomoview = "tomosar.toolbox.tomoview:tomoview"
 tomoprocess = "tomosar.toolbox.tomoprocess:tomoprocess"
-# Dev
-inspect-out = "tomosar.toolbox.other.inspect_out:main"
-rnx-info = "tomosar.toolbox.other.rnx_info:main"
-sliceinfo = "tomosar.toolbox.sliceinfo:main"
-read-imu = "tomosar.toolbox.other.read_imu:main"
 
 
 [tool.hatch.version]

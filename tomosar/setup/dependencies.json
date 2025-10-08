@@ -1,4 +1,22 @@
 {
+	"git": {
+		"Usage": "Setup tool",
+		"Source": "Package manager or https://gitforwindows.org/",
+		"Used_by": {
+			"tools": {
+				"tomosar": ["setup"]
+			}
+		}
+	},
+	"pip": {
+		"Usage": "Installation",
+		"Source": "RUN: python -m ensurepip --default-pip",
+		"Used_by": {
+			"tools": {
+				"tomosar": ["setup"]
+			}
+		}
+	},
 	"convbin": {
 		"Usage": "GNSS binary format conversion to RINEX",
 		"Source": "https://github.com/rinex20/RTKLIB-demo5",
@@ -6,10 +24,9 @@
 			"module": [
 				"tomosar.fetch_swepos()"
 			],
-			"scripts": [
-				"fetch_swepos",
-				"compare_pos"
-			]
+			"tools": {
+				"tomoprocess": ["init", "pre", "swepos"]
+			}
 		}
 	},
 	"rnx2rtkp": {
@@ -19,10 +36,9 @@
 			"module": [
 				"tomosar.fetch_swepos()"
 			],
-			"scripts": [
-				"fetch_swepos",
-				"compare_pos"
-			]
+			"tools": {
+				"tomoprocess": ["init", "pre"]
+			}
 		}
 	},
     "crx2rnx": {
@@ -33,9 +49,9 @@
 				"tomosar.gnss.fetch_swepos_files()",
 				"tomosar.fetch_swepos()"
     		],
-			"scripts": [
-				"fetch_swepos"
-			]
+			"tools": {
+				"tomoprocess": ["init", "pre", "swepos"]
+			}
 		}
     },
     "gfzrnx": {
@@ -46,9 +62,9 @@
 				"tomosar.gnss.unpack_and_merge_rinex()",
 				"tomosar.fetch_swepos()"
     		],
-			"scripts": [
-				"fetch_swepos"
-			]
+			"tools": {
+				"tomoprocess": ["init", "pre", "swepos"]
+			}
 		}
     },
 	"glab": {
@@ -58,9 +74,9 @@
 			"module": [
 				"tomosar.station_ppp()"
     		],
-			"scripts": [
-				"station_ppp"
-			]
+			"tools": {
+				"tomoprocess": ["init", "pre", "ppp"]
+			}
 		}
 	},
 	"unimoco": {
@@ -68,8 +84,11 @@
 		"Source": "Radaz",
 		"Used_by": {
 			"module": [
-				"tomosar"
-			]
+				"NA"
+			],
+			"tools": {
+				"NA": []
+			}
 		}
 	}
 }
