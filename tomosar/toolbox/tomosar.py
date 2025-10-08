@@ -1,5 +1,7 @@
 from importlib.metadata import version as get_version
 import click
+from rich.console import Console
+from rich.markdown import Markdown
 
 from .setup_tools import dependencies, setup, warmup
 from .interact_tools import load, sliceinfo
@@ -14,6 +16,17 @@ def tomosar() -> None:
 def version() -> None:
     """Print TomoSAR version"""
     print(f"TomoSAR version: {get_version('tomosar')}")
+
+@tomosar.command()
+def README() -> None:
+    # Load the README.md file
+    with open("README.md", "r", encoding="utf-8") as f:
+        readme_content = f.read()
+
+    # Create a console and render the markdown
+    console = Console()
+    markdown = Markdown(readme_content)
+    console.print(markdown)
 
 tomosar.add_command(setup)
 tomosar.add_command(dependencies)

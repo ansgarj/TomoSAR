@@ -94,8 +94,8 @@ The following environment variables are used by the `tomosar` module to locate f
 ### CLI Tools
 These are the CLI tools provided by the `tomosar` module:
 1. `tomosar`:  version, help, setup and various Python entry points:
-	1. `tomosar version`: prints the current version
-	2. `tomosar help`: prints a help message similar to this README
+	1. `tomosar version`: prints the current version.
+	2. `tomosar help`: prints this README with some formatting
 	3. `tomosar setup`: installs a Git _hook_ that performs `setup` whenever a successful merge occurs (i.e. on future `git pull` runs, **note**: this is skipped if a `post-merge` Git hook already exists, so you _can_ modify and use your own hooks), then continues setup by checking if the `pyproject.toml` file changed in the last merge (if no merge found it falls back to last commit) and updates the installation if it did, checks if all required binaries are in the `PATH` (in case more were added) and prints helpful information if not, and finally it pre-warms the \_\_pycache\_\_ by compiling the module with all sub-modules and tools.
 	4. `tomosar dependencies`: performs the `PATH` check for required binaries independently of `setup`.
 	5. `tomosar warmup`: pre-warms the \_\_pycache\_\_.
