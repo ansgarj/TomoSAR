@@ -64,11 +64,7 @@ activate() {
 That way I can activate the virtual environment by running e.g. `activate sar` from any folder (say, where I have the radar data). 
 
 ### Required Binaries
-The `tomosar` module relies on some 3rd party software for GNSS processing. It is recommended to make sure you have everything set up before starting to use the toolbox, even though it is not _strictly_ necessary. If you run `tomosar setup` as suggested above, this is already done. Otherwise you can run
-```sh
-tomosar dependencies
-```
-to perform the check independently. This will check if there are any binaries in your `PATH` with the correct names, but not actually test if it is the correct binaries, and provide helpful information if not (including source html links where applicable). The required binaries are:
+The `tomosar` module relies on some 3rd party software for GNSS processing. It is recommended to make sure you have everything set up before starting to use the toolbox, even though it is not _strictly_ necessary. If you run `tomosar setup` as suggested above, this is already done. Otherwise you can run `tomosar dependencies` to perform the check independently. This will check if there are any binaries in your `PATH` with the correct names, but not actually test if it is the correct binaries, and provide helpful information if not (including source html links where applicable). The required binaries are:
 1. `convbin` from `rtklib`
 2. `rnx2rtkp` from `rtklib`
 3. `crx2rnx` from GSI Japan
@@ -78,7 +74,7 @@ to perform the check independently. This will check if there are any binaries in
 
 **NOTE**: some of the binaries will have different names, e.g. `CRX2RNX` or `gLAB_linux` when downloaded, but the name provided above and by `tomotest binaries` are the names the `tomosar` module uses and the binaries should either be _renamed_ and moved into the `PATH` _or_ you can create a _symlink_ with the correct name in the `PATH`. 
 
-**NOTE**: I use the [demo5](https://github.com/rinex20/RTKLIB-demo5) version of `rtklib`, and this is the one `tomotest binaries` will suggest installing if it finds no `convbin` or `rnx2rtkp` binary, **but** it _should_ run on standard `rtklib` as well.
+**NOTE**: I use the [demo5](https://github.com/rinex20/RTKLIB-demo5) version of `rtklib`, and this is the one `tomosar setup`  and `tomosar dependencies` will suggest installing if it finds no `convbin` or `rnx2rtkp` binary, **but** it _should_ run on standard `rtklib` as well.
 
 ## Usage
 The `tomosar` _module_ is a work-in-progress to provide a one-stop toolbox for our tomographic SAR needs. Once installed it can be imported into Python by running `import tomosar`, or you can select submodules or objects as usual  in Python. Currently, the only available documentation is the one present in the code, _but I plan to add separate documentation later._
@@ -96,7 +92,7 @@ These are the CLI tools provided by the `tomosar` module:
 1. `tomosar`:  version, help, setup, planning and various Python entry points:
 	1. `tomosar version`: prints the current version.
 	2. `tomosar help`: prints this README with some formatting
-	3. `tomosar setup`: installs a Git _hook_ that performs `setup` whenever a successful merge occurs (i.e. on future `git pull` runs, **note**: this is skipped if a `post-merge` Git hook already exists, so you _can_ modify and use your own hooks), then continues setup by checking if the `pyproject.toml` file changed in the last merge (if no merge found it falls back to last commit) and updates the installation if it did, checks if all required binaries are in the `PATH` (in case more were added) and prints helpful information if not, and finally it pre-warms the \_\_pycache\_\_ by compiling the module with all sub-modules and tools.
+	3. `tomosar setup`: installs a Git _hook_ that performs `setup` whenever a successful merge occurs (i.e. on future `git pull` runs, **note**: this is skipped if a `post-merge` Git hook already exists, so you _can_ modify and use your own hooks), then updates the installation, checks if all required binaries are in the `PATH` (in case more were added) and prints helpful information if not, and finally it pre-warms the \_\_pycache\_\_ by compiling the module with all sub-modules and tools.
 	4. `tomosar dependencies`: performs the `PATH` check for required binaries independently of `setup`.
 	5. `tomosar warmup`: pre-warms the \_\_pycache\_\_.
 	6. `tomosar optimize`: **NOT IMPLEMENTED** plans a flight for optimizing _nominal_ SAR parameters according to given restraints.
