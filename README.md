@@ -93,14 +93,16 @@ The following environment variables are used by the `tomosar` module to locate f
 
 ### CLI Tools
 These are the CLI tools provided by the `tomosar` module:
-1. `tomosar`:  version, help, setup and various Python entry points:
+1. `tomosar`:  version, help, setup, planning and various Python entry points:
 	1. `tomosar version`: prints the current version.
 	2. `tomosar help`: prints this README with some formatting
 	3. `tomosar setup`: installs a Git _hook_ that performs `setup` whenever a successful merge occurs (i.e. on future `git pull` runs, **note**: this is skipped if a `post-merge` Git hook already exists, so you _can_ modify and use your own hooks), then continues setup by checking if the `pyproject.toml` file changed in the last merge (if no merge found it falls back to last commit) and updates the installation if it did, checks if all required binaries are in the `PATH` (in case more were added) and prints helpful information if not, and finally it pre-warms the \_\_pycache\_\_ by compiling the module with all sub-modules and tools.
 	4. `tomosar dependencies`: performs the `PATH` check for required binaries independently of `setup`.
 	5. `tomosar warmup`: pre-warms the \_\_pycache\_\_.
-	6. `tomosar sliceinfo`: scans a directory for slice files and collects them into a `SliceInfo` object, and then opens an interactive Python console with the `SliceInfo` object stored under `slices`. 
-	7. `tomosar load`: loads a single [Tomogram Directory](#tomogram-directories) or multiple [Tomogram Directories](#tomogram-directories) into a `TomoScenes` object, and then opens an interactive Python console with the `TomoScenes` object stored under `tomos`. 
+	6. `tomosar optimize`: **NOT IMPLEMENTED** plans a flight for optimizing _nominal_ SAR parameters according to given restraints.
+	7. `tomosar plan`: **NOT IMPLEMENTED** interactively models a _planned flight_ to allow validation of ideal SAR parameters across different tomograms (**Note**: this does not take into account flight instabilities that can occur during the actual flight).
+	8. `tomosar sliceinfo`: scans a directory for slice files and collects them into a `SliceInfo` object, and then opens an interactive Python console with the `SliceInfo` object stored under `slices`. 
+	9. `tomosar load`: loads a single [Tomogram Directory](#tomogram-directories) or multiple [Tomogram Directories](#tomogram-directories) into a `TomoScenes` object, and then opens an interactive Python console with the `TomoScenes` object stored under `tomos`. 
 2. `tomotest`: used for various tests
 	1. `tomotest gnss`: **NOT IMPLEMENTED** tests GNSS processing capabilities, ensuring that your binaries work as intended and are compatible with the module.
 	2. `tomotest ppp`: **NOT IMPLEMENTED** tests base station PPP performance against ground truth as given in a `mocoref.moco` file.

@@ -18,8 +18,8 @@ def version() -> None:
     print(f"TomoSAR version: {get_version('tomosar')}")
 
 @tomosar.command()
-def README() -> None:
-    # Load the README.md file
+def help() -> None:
+    """Prints the README.md file"""
     with open("README.md", "r", encoding="utf-8") as f:
         readme_content = f.read()
 
