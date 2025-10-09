@@ -43,9 +43,13 @@ def warm_cache():
 def setup():
     """Performs TomoSAR setup"""
     post_merge_path = PROJECT_PATH / ".git" / "hooks" / "post-merge"
+    pre_push_path = PROJECT_PATH / ".git" / "hooks" / "pre-push"
     if not post_merge_path.exists():
         shutil.copy2(PROJECT_PATH / "setup" / "post-merge", post_merge_path)
         print("Project post-merge hook installed.")
+    if not pre_push_path.exists():
+        shutil.copy2(PROJECT_PATH / "setup" / "pre-push", pre_push_path)
+        print("Project pre-push hook installed.")
     run(["pip", "install", "-e", PROJECT_PATH])
     print("Installation updated.")
     check_required_binaries()

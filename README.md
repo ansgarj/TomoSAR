@@ -92,7 +92,7 @@ These are the CLI tools provided by the `tomosar` module:
 1. `tomosar`:  version, help, setup, planning and various Python entry points:
 	1. `tomosar version`: prints the current version.
 	2. `tomosar help`: prints this README with some formatting
-	3. `tomosar setup`: installs a Git _hook_ that performs `setup` whenever a successful merge occurs (i.e. on future `git pull` runs, **note**: this is skipped if a `post-merge` Git hook already exists, so you _can_ modify and use your own hooks), then updates the installation, checks if all required binaries are in the `PATH` (in case more were added) and prints helpful information if not, and finally it pre-warms the \_\_pycache\_\_ by compiling the module with all sub-modules and tools.
+	3. `tomosar setup`: installs Git _hooks_ that performs `setup` whenever a successful merge occurs (i.e. on future `git pull` calls) and before `git push` (**note**: this is skipped if the corresponding Git hooks already exist, so you _can_ modify and use your own hooks), then updates the installation, checks if all required binaries are in the `PATH` (in case more were added) and prints helpful information if not, and finally it pre-warms the \_\_pycache\_\_ by compiling the module with all sub-modules and tools.
 	4. `tomosar dependencies`: performs the `PATH` check for required binaries independently of `setup`.
 	5. `tomosar warmup`: pre-warms the \_\_pycache\_\_.
 	6. `tomosar optimize`: **NOT IMPLEMENTED** plans a flight for optimizing _nominal_ SAR parameters according to given restraints.
@@ -178,6 +178,8 @@ If you want to modify the module or work on features to add, always **create you
 4. `git commit -m "Write a description here"`
 5. `git push origin feature/my-branch`
 6. You can then go to [GitHub](https://github.com/ansgarj/TomoSAR) and make a **pull request** for me to integrate it into the main branch
+
+**NOTE**: If you're not a _collaborator_, please fork the repository first, then follow the same steps in your fork. After pushing your branch, open a pull request to this repository.
 
 **NOTE**: to push changes you must set up your identity:
 ```sh
