@@ -45,6 +45,7 @@ def setup():
     post_merge_path = PROJECT_PATH / ".git" / "hooks" / "post-merge"
     if not post_merge_path.exists():
         shutil.copy2(PROJECT_PATH / "setup" / "post-merge", post_merge_path)
+        print("Project post-merge hook installed.")
     if pyproject_changed():
         run(["pip", "install", "-e", PROJECT_PATH])
     else:
