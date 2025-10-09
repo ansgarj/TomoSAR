@@ -8,9 +8,6 @@ description = "Toolbox for tomographic SAR processing from RD350 drone data"
 authors = [
     {name = "Ansgar Jörgenfelt", email = "ansgar.jorgenfelt@slu.se"}
 ]
-maintainers = [
-    {name = "Ansgar Jörgenfelt", email = "ansgar.jorgenfelt@slu.se"}
-]
 keywords = ["SAR", "tomographic", "tomogram", "Radaz", "RD350", "radar", "microwaves", "processing"]
 readme = "README.md"
 license = "BSD-3-Clause"

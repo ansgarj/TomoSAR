@@ -47,6 +47,7 @@ def setup():
         shutil.copy2(PROJECT_PATH / "setup" / "post-merge", post_merge_path)
         print("Project post-merge hook installed.")
     if pyproject_changed():
+        print("Installation file updated, running install ...")
         run(["pip", "install", "-e", PROJECT_PATH])
     else:
         print("Installation up to speed, no action required.")
