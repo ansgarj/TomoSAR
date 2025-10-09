@@ -32,8 +32,6 @@ dependencies = [
 ]
 classifiers = [
     "Development Status :: 3 - Alpha",
-    "Intended Audience :: SLU Radar Team",
-    "Topic :: Tomographic SAR processing",
     "Programming Language :: Python",
     "Private :: Do Not Upload",
 ]
@@ -51,7 +49,8 @@ tomoview = "tomosar.toolbox.tomoview:tomoview"
 tomoprocess = "tomosar.toolbox.tomoprocess:tomoprocess"
 
 [project.urls]
-repository = "https://github.com/ansgarj/TomoSAR.git"
+Homepage = "https://github.com/ansgarj/TomoSAR.git"
+Repository = "https://github.com/ansgarj/TomoSAR.git"
 
 [tool.hatch.version]
 source = "vcs"
@@ -61,4 +60,4 @@ fallback-version = "0.0.0"
 version_scheme = "no-guess-dev"
 
 [tool.hatch.build.hooks.vcs]
-version-file = "_version.py"
+version-file = "tomosar/version.py"

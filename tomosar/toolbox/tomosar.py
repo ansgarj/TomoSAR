@@ -3,6 +3,7 @@ import click
 from rich.console import Console
 from rich.markdown import Markdown
 
+from tomosar.version import __version__
 from .setup_tools import dependencies, setup, warmup
 from .interact_tools import load, sliceinfo
 from .dev_tools import rnx_info, read_imu, inspect_out, compare_rtkp
@@ -15,8 +16,7 @@ def tomosar() -> None:
 @tomosar.command()
 def version() -> None:
     """Print TomoSAR version"""
-    print(f"TomoSAR version: {get_version('tomosar')}")
-
+    print(f"TomoSAR version: {__version__}")
 @tomosar.command()
 def help() -> None:
     """Prints the README.md file"""
