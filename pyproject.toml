@@ -9,7 +9,7 @@ authors = [
     {name = "Ansgar Jörgenfelt", email = "ansgar.jorgenfelt@slu.se"}
 ]
 maintainers = [
-    {name = "Ansgar Jörgenfelt"}
+    {name = "Ansgar Jörgenfelt", email = "ansgar.jorgenfelt@slu.se"}
 ]
 keywords = ["SAR", "tomographic", "tomogram", "Radaz", "RD350", "radar", "microwaves", "processing"]
 readme = "README.md"
