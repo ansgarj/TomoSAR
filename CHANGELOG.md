@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [0.0.2]
 
 ### Added
 - Pre-push hook
@@ -15,7 +15,6 @@ All notable changes to this project will be documented in this file.
 - Added dict-like methods to Masks object
 - Updated __init__ to match new named functions for 3rd party dependencies
 - Moved from environment variables to local settings (`.local/settings.json`)
-- Updated `tomosar setup` to write default `settings.json` file
 - Changed `data_path()` to general purpose resource context manager named `resource()`
 
 ### Fixed
