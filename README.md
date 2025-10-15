@@ -27,9 +27,9 @@ pip install -e .
 tomosar setup
 ```
 
-**NOTE**: running `tomosar setup` is not strictly required, but will install a Git _hook_ for you, check if all required binaries are present and help you if not, and pre-warm the \_\_pycache\_\_ (see more [below](#cli-tools))
+**NOTE**: running `tomosar setup` is not strictly required, but will install two basic Git _hooks_ for you, check if all required binaries are present and help you if not, and pre-warm the \_\_pycache\_\_.
 
-In the above example the Python virtual environment is created inside a `.venv` folder inside the `TomoSar` project directory. I find this helpful to contain the project in one directory. **Note**: do _not_ use another name for the virtual environment if placed inside the project directory, but _if you do_ then you must add this folder to the `.gitignore` file, e.g.:
+In the above example the Python virtual environment is created inside a `.venv` folder inside the `TomoSar` project directory. I find this helpful to contain the project in one directory. **NOTE**: do _not_ use another name for the virtual environment if placed inside the project directory, but _if you do_ then you must add this folder to the `.gitignore` file, e.g.:
 ```sh
 ...
 
@@ -74,69 +74,43 @@ The `tomosar` module relies on some 3rd party software for GNSS processing. It i
 
 **NOTE**: some of the binaries will have different names, e.g. `CRX2RNX` or `gLAB_linux` when downloaded, but the name provided above and by `tomotest binaries` are the names the `tomosar` module uses and the binaries should either be _renamed_ and moved into the `PATH` _or_ you can create a _symlink_ with the correct name in the `PATH`. 
 
+**NOTE**: _TomoSAR_ uses the `tomosar.resource` (from `.binaries`) context manager to provide local copies of various files in the working directory (not radar, IMU or GNSS data which are expected to be inside the working directory tree). The basic reason for this is to allow the use of containers to run 3rd party binaries (such as docker). 
+
 **NOTE**: I use the [demo5](https://github.com/rinex20/RTKLIB-demo5) version of `rtklib`, and this is the one `tomosar setup`  and `tomosar dependencies` will suggest installing if it finds no `convbin` or `rnx2rtkp` binary, **but** it _should_ run on standard `rtklib` as well.
 
 ## Usage
 The `tomosar` _module_ is a work-in-progress to provide a one-stop toolbox for our tomographic SAR needs. Once installed it can be imported into Python by running `import tomosar`, or you can select submodules or objects as usual  in Python. Currently, the only available documentation is the one present in the code, _but I plan to add separate documentation later._
 
-The [CLI tools](#cli-tools) are intended to provide a toolbox for the most common or predicted needs, the idea being that unless you are working on your own project with something not integrated into the CLI tools, you can use the module directly from the terminal by running a command without having to enter into Python and importing the module.  All tools can be called with `--help` for some basic syntax. 
+The CLI tools are intended to provide a toolbox for the most common or predicted needs, the idea being that unless you are working on your own project with something not integrated into the CLI tools, you can use the module directly from the terminal by running a command without having to enter into Python and importing the module.  All tools can be called with `--help` for some basic syntax and `tomosar help` prints a general help overview:
+1. `tomosar` which is used for setup tools, settings, info and Python terminal entry points;
+2. `tomoprocess` which is used for all steps in the processing chain;
+3. `tomoview` which is used to launch GUI viewers for [Tomogram Directories](#tomogram-directories);
+4. `tomotest` which contains various performance tests.
 
-### Environment Variables
-The following environment variables are used by the `tomosar` module to locate files that are kept _only locally_ for memory reasons: `TOMOMASKS` (used to locate `.shp` masks), `TOMODEMS` (used to locate `.tif` files that provide DEM:s) and `TOMOCANOPIES` (used to locate `.tif` files that provide DSM:s used to identify **canopy** ). If not set, `tomosar` will default to using only the user provided folder (see documentation). It is recommended to set the variables in order to avoid needing to track them manually. Note that
-- `TOMOMASKS` _or a user passed substitute_ is **never** required;
-- `TOMODEMS` _or a user passed substitute_ is **required** only when processing slices with a ground reference;
-- `TOMOCANOPIES` _or a user passed substitute_ is **required** only when processing slices with a canopy reference.
+**NOTE**: many of these tools are not yet fully implemented.
 
-### CLI Tools
-These are the CLI tools provided by the `tomosar` module:
-1. `tomosar`:  version, help, setup, planning and various Python entry points:
-	1. `tomosar version`: prints the current version.
-	2. `tomosar help`: prints this README with some formatting
-	3. `tomosar setup`: installs Git _hooks_ that performs `setup` whenever a successful merge occurs (i.e. on future `git pull` calls) and before `git push` (**note**: this is skipped if the corresponding Git hooks already exist, so you _can_ modify and use your own hooks), then updates the installation, checks if all required binaries are in the `PATH` (in case more were added) and prints helpful information if not, and finally it pre-warms the \_\_pycache\_\_ by compiling the module with all sub-modules and tools.
-	4. `tomosar dependencies`: performs the `PATH` check for required binaries independently of `setup`.
-	5. `tomosar warmup`: pre-warms the \_\_pycache\_\_.
-	6. `tomosar optimize`: **NOT IMPLEMENTED** plans a flight for optimizing _nominal_ SAR parameters according to given restraints.
-	7. `tomosar plan`: **NOT IMPLEMENTED** interactively models a _planned flight_ to allow validation of ideal SAR parameters across different tomograms (**Note**: this does not take into account flight instabilities that can occur during the actual flight).
-	8. `tomosar sliceinfo`: scans a directory for slice files and collects them into a `SliceInfo` object, and then opens an interactive Python console with the `SliceInfo` object stored under `slices`. 
-	9. `tomosar load`: loads a single [Tomogram Directory](#tomogram-directories) or multiple [Tomogram Directories](#tomogram-directories) into a `TomoScenes` object, and then opens an interactive Python console with the `TomoScenes` object stored under `tomos`. 
-2. `tomotest`: used for various tests
-	1. `tomotest gnss`: **NOT IMPLEMENTED** tests GNSS processing capabilities, ensuring that your binaries work as intended and are compatible with the module.
-	2. `tomotest ppp`: **NOT IMPLEMENTED** tests base station PPP performance against ground truth as given in a `mocoref.moco` file.
-3. `tomoprocess`: used for all things processing
-	1. `tomoprocess init`: **NOT IMPLEMENTED** directly generates a processing directory from a [Data Directory](#data-directories). It will identify what files are present, if necessary generate a `mocoref.moco` file from a CSV file using `mocoref` or if necessary subsititute for a missing mocoref data by running `ppp` on the GNSS base station observation file, or subsitute for missing GNSS base station files by downloading rinex files from _Swepos_ using `swepos`. Then it will copy all necessary files into a processing directory located in `../../Processing/{name}_{today}` where `{name}` is the name of the data directory and `{today}` is the date when the processing directory was generated (for tracking different processings). The generated directory will have the correct file structure for **Radaz** functions. Finally `process-dir` initiates `preprocess` in the processing directory.
-	2. `tomoprocess mocoref`: **NOT IMPLEMENTED** generates a correctly formatted `mocoref.moco` file from a CSV file,  reading the columns named `Longitude`, `Latitude`, `Ellipsoidal height` and `Antenna height` (default column names from _Emlid Reach_) for mocoref data. If multiple lines are present in the CSV files it will by default read the first line (modify by `--line X`). Antenna height can be specified manually, overriding CSV data by `--antenna X`. 
-	3. `tomoprocess ppp`: runs PPP processing on a GNSS base station directory to find its position, updates the rinex header with the correct position and generates a `mocoref.moco` file (**mocoref generation not fully implemented**). In theory this can be _more precise_ than using Emlid with NTRIP but because we don't have exact antenna calibration data for the GNSS we have used (CHCI83) it is limited by manual identification of correct antenna phase offset centers, and **this is done by comparison with Emlid NTRIP measurements**. Thus they should be approximately equivalent.
-	4. `tomoprocess swepos`: downloads and merges the necessary rinex data from the nearest station in the  _Swepos_ network, for any given drone `gnss_logger_dat-[...].bin` file. These file have the correct exact position in the RINEX header, but will be more distant from the flight (longer _baseline_ which can introduce other errors: in testing it is roughly equivalent to using our GNSS with Emlid NTRIP measurement of the position). **Note**: in the process it will use `convbin` to convert the UBX .bin file to RINEX files if this is not done already.
-	5. `tomoprocess pre`: **NOT IMPLEMENTED** subsititutes for `gdl -q -e proz,/heli` by correctly identifying the GNSS rinex files and uses `trackfinder` to identify the correct track timestamps for _spiral flights_.
-	6. `tomoprocess trackfinder`: correctly identifies all tested flight timestamps and generates the `radar[...].inf` file for spiral flight processing. Can be used to generate the correct timestamps for linear flights by `trackfinder -l` or more generally `trackfinder -l X`. 
-	7. `tomoprocess analysis`: **NOT IMPLEMENTED** analyzes the spiral flights and models them. Used to verify _idealized flight_ vs. _planned flight_, and to inspect _realized flight_ parameters, including anisotropies from flight instabilities. Can provide optimal processing parameters for `tomo`/`slice`. 
-	8. `tomoprocess tomo`: **NOT IMPLEMENTED** chains `slice` and `forge` to generate a [Tomogram Directory](#tomogram-directories), or content for one. 
-	9. `tomoprocess slice`: **NOT IMPLEMENTED** initiates a _backprojection_ loop to generate all slices for the specified tomogram.
-	10. `tomoprocess forge:` scans paths for slice files and intelligently combines them into [Tomogram Directories](#tomogram-directories)
-4. `tomoview`: used for viewing tomograms, statistics, e.t.c
-	1. ...
+### Settings
+The local _TomoSAR_ settings are stored inside the `.local` folder inside the project directory in a `settings.json` file (this is generated by `tomosar setup` but if it does not exist any internal function that reads settings generates it at that point). The current settings can be viewed with `tomosar settings` which prints to stdout. If the `RTKP_CONFIG` setting is `null` _TomoSAR_ will use internal configuration files, and similarly if `FILES: ANTENNAS: SATELLITES` is `null`.
+
+`FILES: ANTENNAS` can otherwise be used to point to antenna files containing absolute reference data for the receiver antenna. If I find any good one it will be added internally, but if any file is used it will override the default antenna _phase offset center_ (`DEFAULT_POC` in settings), and if the file e.g. contains only phase offset information for G01 and G02 (GPS satellites L1 and L2 frequencies) then **all other POC values are set to zero**. Since we rely mostly on other constellations this would actually diminish the accuracy noticeably.
+
+Note that you can set login info for the Swepos network (so you don't have to specify manually) by `tomosar set SWEPOS_USERNAME` and `tomosar set SWEPOS_PASSWORD`, but that the password is stored inside `settings.json` in an **unencrypted state**. Use therefore with caution. 
+
+Finally you can use `tomosar add` to add files or folders to `FILES: DEMS`, `FILES: CANOPIES` and `FILES: MASKS`. These lists are used by _TomoSAR_ to find GeoTIFF files for DEM and canopy DSM references, and shape files for masking tomograms. The GeoTIFF files are used for slicing (`tomoprocess slice` \[**NOTIMPLEMENTED**\]) with either the ground or the canopy as reference respectively. The shapefiles are used to generate masks by `tomoprocess forge`, and can be updated for a [Tomogram Directory](#tomogram-directories) or multiple [Tomogram Directories](#tomogram-directories) by running `tomosar load --update` and then inside the Python terminal:
+```python
+tomos.save()
+```
 
 ### Data Directories
-As a _data directory_ functions anything containing at least the done data. There are no specific requirements on the _internal_ structure. However, if `tomoprocess dir` is to be used to generate _processing directories_, a _data directory_ should be placed inside a containing folder next to a `Processing` folder, e.g.:
-```
-.../
- |-- Campaigns/
- |     |-- 20250617_krycklan/
- |     |-- 20250827_0100_krycklan/
- |     |-- ...
- |- Processing/
- |     |-- 20250617_krycklan_20251001/
- |     |-- 20250617_krycklan_20251006/
- |     |-- 20250827_0100_krycklan_20251006/
- |     |-- ...
- |- Tomograms/
- |     |-- [...].tomo
-```
+As a _data directory_ functions anything containing at least the drone data. There are no specific requirements on the _internal_ structure, but each data directory should contain **only one set of data** (one recording from the drone and matching GNSS data if available). Data directories are _generated_ by `tomoprocess data` \[**NOT IMPLEMENTED**\] if used to fetch drone data. **By default** they are generated inside `$HOME/Radar/Data` but this can be altered with `tomosar set DATA_DIRS /your/path/here`.
+
+### Processing Directories
+Processing directories have the internal structure required by the Radaz processing functions, even in those cases (if any) where TomoSAR replaces them, for compatibility reasons. They are _generated_ by `tomoprocess init` \[**NOT IMPLEMENTED**\]. **By default** they are generated inside `$HOME/Radar/Processing` but this can be altered with `tomosar set PROCESSING_DIRS /your/path/here`.
 
 ### Tomogram Directories
-A _Tomogram Directory_ is an output directory ending with `.tomo` generated by `tomoprocess forge` or `tomoprocess tomo`, which contains _all relevant files_ and serves as an output repository for _processed data_. It contains an _internal structure_ that must be maintained, and any files contained in there can be accessed normally for 3rd party software or file sharing et.c. It is thus a **unified** output format for storing processed data, making collaboration easier.
+A _Tomogram Directory_ is an output directory ending with `.tomo` generated by `tomoprocess forge` or `tomoprocess tomo`, which contains _all relevant files_ and serves as an output repository for _processed data_. It contains an _internal structure_ that must be maintained, and any files contained in there can be accessed normally for 3rd party software or file sharing et.c. It is thus a **unified** output format for storing processed data, making collaboration easier. **By default** they are generated inside `$HOME/Radar/Tomograms` but this can be altered with `tomosar set TOMOGRAM_DIRS /your/path/here`. 
 
-However, the **main advantage** of the `.tomo` directories is that they can be loaded directly by `tomoload` for viewing the tomogram, plotting statistics or other analysis tools (**under implementation**). 
+However, the **main advantage** of the `.tomo` directories is that they can be loaded directly by `tomoview` for viewing the tomogram, plotting statistics or other analysis tools (**under implementation**).
 
 ```
 yyyy-mm-dd-HH-MM-SS-XX-tag.tomo/

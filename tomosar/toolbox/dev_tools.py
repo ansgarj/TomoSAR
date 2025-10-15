@@ -6,11 +6,10 @@ import csv
 import matplotlib.pyplot as plt
 import csv
 import struct
-import json
 import numpy as np
 
-from tomosar import run
-from tomosar.gnss import extract_rnx_info, read_out_file, read_pos_file
+from ..gnss import extract_rnx_info, read_out_file, read_pos_file
+from ..binaries import rnx2rtkp, resource
 
 @click.command()
 @click.argument("file", type=click.Path(exists=True, path_type=Path))
@@ -135,59 +134,39 @@ def compare_rtkp(rover_obs, base1_obs, base2_obs, nav_path, conf_path, sbs_path,
 
     pos1_path =  base1_obs.with_suffix(".pos")
     pos2_path = base2_obs.with_suffix(".pos")
-    # Base 1 command
-    cmd = [
-        'rnx2rtkp',
-          "-o", pos1_path,
-    ]
-    # Add config file if available
-    if conf_path:
-        cmd.extend(['-k', conf_path])
-    # Add reference position from mocoref if available
-    if mocoref_path:
-        with open(mocoref_path, 'r') as f:
-            mocoref = json.load(f)
-        print(f"mocoref: {mocoref}")
-        h = mocoref["h"] - 0.2
-        cmd.extend(["-l", str(mocoref["lat"]), str(mocoref["lon"]), str(h)])
-    # Add rinex files
-    cmd.extend([rover_obs, base1_obs, nav_path])
-    # Add sbs file of available
-    if sbs_path:
-        cmd.append(sbs_path)
-    if not pos1_path.exists() or force:
-        print(*cmd)
-        run(cmd)
+    # Run base 1
+    with resource(conf_path, "RTKP_CONFIG") as config:
+        rnx2rtkp(
+            rover_obs=rover_obs,
+            base_obs=base1_obs,
+            nav_file=nav_path,
+            config=conf_path,
+            out_path=pos1_path,
+            mocoref_file=mocoref_path,
+            sbs_file=sbs_path
+        )
     # Read results
     coords1, q1, t1 = read_pos_file(pos1_path)
     # Display Q=1 percentage
     print(f"{pos1_path} Q1: {q1} %")
 
-    # Base 2 command 
-    cmd = [
-        'rnx2rtkp',
-          "-o", pos2_path,
-    ]
-    # Add config file if available
-    if conf_path:
-        cmd.extend(['-k', conf_path])
-    # Add rinex files
-    cmd.extend([rover_obs, base2_obs, nav_path])
-    # Add sbs file of available
-    if sbs_path:
-        cmd.append(sbs_path)
-    # Process second base
-    if not pos2_path.exists() or force:
-        print(*cmd)
-        run(cmd)
-
+    # Run base 2
+    with resource(conf_path, "RTKP_CONFIG") as config:
+        rnx2rtkp(
+            rover_obs=rover_obs,
+            base_obs=base2_obs,
+            nav_file=nav_path,
+            config=config,
+            out_path=pos1_path,
+            mocoref_file=None,
+            sbs_file=sbs_path
+        )
     # Read results
     coords2, q2, t2 = read_pos_file(pos2_path)
     # Display Q=1 percentage
     print(f"{pos2_path} Q1: {q2} %")
 
     labels = ['East/X', 'North/Y', 'Up/Z']
-
 
     #plot_coordinates(coords1, coords2, labels, pos1, pos2)
 

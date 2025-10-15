@@ -1,3 +1,9 @@
+# Dynamic version file
+version.py
+
+# Local settings et.c.
+.local/
+
 # Python virtual environment
 .venv/
 
@@ -13,8 +19,9 @@ __pycache__/
 # Obsidian vault settings
 .obsidian/
 
-# macOS system files
+# OS system files
 .DS_Store
+.trash/
 
 # Syncthing files
 .stfolder/
@@ -23,6 +30,3 @@ __pycache__/
 # Temporary files
 *.tmp
 *.temp
-
-# Dynamic version file
-version.py

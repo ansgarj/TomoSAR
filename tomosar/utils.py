@@ -19,22 +19,39 @@ from collections import defaultdict
 from ftplib import FTP, error_perm
 from getpass import getpass
 from pathlib import Path
-from importlib.resources import path as importpath
-from contextlib import contextmanager
-from typing import Iterator
-import shutil
 import gzip
 import code
 import sys
+import hashlib
 
 from .processing import circularize
 
 # Custom warnings
+import inspect
+import sys
+
 def warn(message):
-    frame = inspect.currentframe().f_back
-    filename = frame.f_code.co_filename
-    lineno = frame.f_lineno
-    print(f"{filename}:{lineno}: {message}")
+    # Get the current stack
+    stack = inspect.stack()
+
+    # Get the caller (who called warn) and its parent (if available)
+    caller_frame = stack[1]
+    parent_frame = stack[2] if len(stack) > 2 else None
+
+    # Extract info
+    caller_func = caller_frame.function
+    if parent_frame:
+        filename = parent_frame.filename
+        lineno = parent_frame.lineno
+    else:
+        filename = caller_frame.filename
+        lineno = caller_frame.lineno
+
+    # ANSI escape code for yellow text
+    YELLOW = "\033[93m"
+    RESET = "\033[0m"
+
+    print(f"{YELLOW}{filename}:{lineno} in {caller_func}(): {message}{RESET}", file=sys.stderr)
 
 # Load interactive console
 def interactive_console(var_dict: dict) -> None:
@@ -57,6 +74,45 @@ def interactive_console(var_dict: dict) -> None:
 
     # Launch console with variables available
     code.interact(banner=banner, local=var_dict)
+    
+# Hashing
+def changed(hash_file: Path|str, input: list[Path|str]|Path|str) -> bool:
+    """Generates hash from input and compare against hash stored in hash file.
+    Updates hash in hash file if a change was found."""
+    def generate_hash() -> str:
+        hasher = hashlib.sha256()
+        for path in sorted(input):  # sort to ensure consistent order
+            try:
+                full_path = str(Path(path).resolve())
+                stat = os.stat(full_path)
+                hasher.update(full_path.encode())
+                hasher.update(str(stat.st_mtime).encode())
+                hasher.update(str(stat.st_size).encode())
+            except FileNotFoundError:
+                continue 
+        return hasher.hexdigest()
+    
+    if isinstance(input, Path|str):
+        input = [input]
+
+    new_hash = generate_hash(input)
+
+    # Compare against previous hash
+    hash_file = Path(hash_file)
+    if hash_file.exists():   
+        # Read hash file
+        with open(hash_file, 'r') as src:
+            old_hash = src.read()
+
+        # Compare
+        if new_hash == old_hash:
+            return False
+        
+    # Update hash
+    with open(hash_file, 'w') as dst:
+        dst.write(new_hash)
+
+    return True
 
 # Find change points in linear statistics
 def find_inliers(signal, min_samples: int|float = 0.5, residual_threshold: float|None = None,
@@ -629,28 +685,3 @@ def gunzip(input_path: Path|str, output_path: Path|str = None) -> Path:
 
     input_path.unlink()  # Delete the original .gz file
     return output_path
-
-@contextmanager
-def data_path(path: str | Path | None, filename: str) -> Iterator[Path]:
-    if path:
-        path = Path(path)
-        if path.exists() and path.is_file():
-            yield path
-            return
-
-    with importpath('tomosar.data', filename) as resource_path:
-        resource_path = Path(resource_path)
-        if resource_path.exists() and resource_path.is_file():
-            # Create a temp file in the current working directory
-            tmp_path = Path(os.getcwd()) / filename
-            tmp_path = tmp_path.with_suffix(".tmp")
-            shutil.copy(resource_path, tmp_path)
-            try:
-                yield tmp_path
-            finally:
-                tmp_path.unlink(missing_ok=True)  # Clean up after use
-            return
-
-    raise FileNotFoundError(
-        f"{f"The file {path} was not found, and " if path else ""}'{filename}' is not a valid tomosar.data file."
-    )

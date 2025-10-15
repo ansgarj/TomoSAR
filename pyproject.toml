@@ -51,6 +51,7 @@ tomoprocess = "tomosar.toolbox.tomoprocess:tomoprocess"
 [project.urls]
 Homepage = "https://github.com/ansgarj/TomoSAR.git"
 Repository = "https://github.com/ansgarj/TomoSAR.git"
+Changelog = "https://github.com/ansgarj/TomoSAR/blob/main/CHANGELOG.md"
 
 [tool.hatch.version]
 source = "vcs"

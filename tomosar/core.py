@@ -1,6 +1,8 @@
 # Imports
+from __future__ import annotations
 import os
 import re
+import socket
 import shutil
 from pathlib import Path
 from datetime import datetime, date, time
@@ -8,18 +10,20 @@ from typing import Dict, ClassVar
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import numpy as np
 import pandas as pd
+import geopandas as gpd
 from dataclasses import dataclass, field, fields
 import rasterio
 from rasterio.profiles import Profile
 from rasterio.transform import Affine
+from rasterio.features import rasterize
 import json
 from collections import defaultdict
 import copy
 
 from .utils import warn, collect_statistics, estimaterr, apply_variable_descriptions, parse_datetime_string
 from .processing import multilook, filter
-from .environment import Mask, get_masks
 from .apperture import SARModel
+from .config import Settings
 
 ### Custom classes
 @dataclass
@@ -472,11 +476,46 @@ class SliceInfo:
             return False
         return all(slice in other.slices for slice in self.slices) and len(self.slices) == len(other.slices)
 
+@dataclass
+class Mask:
+    name: str = ""
+    id: int = 0
+    mask: np.ndarray = field(default=None, repr=False)
+    multilooked: np.ndarray = field(default=None, repr=False)
+    metadata: dict = field(default_factory=dict)
+
+    def copy(self) -> 'Mask':
+        new_mask = Mask(name=self.name)
+        new_mask.mask = self.mask.copy() if self.mask is not None else None
+        return new_mask
+    
+    def apply(self, tomogram: np.ndarray, multilooked: bool = False) -> np.ndarray:
+        masked_tomogram = tomogram.copy()
+        if multilooked:
+            mask = np.broadcast_to(self.multilooked[np.newaxis, :, :], tomogram.shape)
+        else:
+            mask = np.broadcast_to(self.mask[np.newaxis, :, :], tomogram.shape)
+        if np.iscomplexobj(tomogram):
+            masked_tomogram[~mask] = np.nan + np.nan*1j
+        else:
+            masked_tomogram[~mask] = np.nan
+
+        return masked_tomogram
+
 class Masks:
-    def __init__(self, parent: "TomoInfo" = None, masks: dict[str,list[Mask]] = defaultdict[list]):
-        self.parent = parent
-        self.masks = masks
+    def __init__(self, parent: TomoInfo = None, masks: dict[str,list[Mask]] = defaultdict[list]):
+        self.parent: TomoInfo = parent
+        self.masks: dict[str,list[Mask]] = masks
             
+    def keys(self):
+        return self.masks.keys()
+    
+    def values(self):
+        return self.masks.values()
+    
+    def items(self):
+        return self.masks.items()
+    
     def update(self, mask_dir: str = ""):
         if self.parent.tomograms.profile is None:
             raise ValueError("Tomograms profile must be set before updating masks.")
@@ -497,11 +536,10 @@ class Masks:
             masks = [masks]
         self.masks[key] = masks
 
-    def read(self) -> 'Masks':
-        # Placeholder for reading masks from files
-        return self
+    def read(self, path: str|Path) -> Masks:
+        self.masks = restore_cache(path)     
 
-    def copy(self) -> 'Masks':
+    def copy(self) -> Masks:
         new_masks = Masks()
         new_masks.masks = copy.deepcopy(self.masks)
         return new_masks
@@ -760,10 +798,10 @@ class Filter:
 
 @dataclass
 class TomoStats:
-    parent: 'TomoInfo' = field(repr=False,compare=False)
+    parent: TomoInfo | SceneStats = field(repr=False,compare=False)
     stats: Dict[str, pd.DataFrame] = field(default_factory=dict)
 
-    def copy(self) -> 'TomoStats':
+    def copy(self) -> TomoStats:
         new_stats = TomoStats()
         for key, value in self.stats:
             new_stats[key] = value.copy()
@@ -806,7 +844,7 @@ class TomoStats:
             apply_variable_descriptions(self['multilooked'])
 
     @classmethod
-    def load(cls, parent: 'TomoInfo', path: Path|str, cached: bool) -> 'TomoStats':
+    def load(cls, parent: 'TomoInfo'|'SceneStats', path: Path|str, cached: bool) -> TomoStats:
         path = Path(path)
         stats = cls(parent=parent)
         # Load main statistics files
@@ -861,6 +899,69 @@ class TomoStats:
         return bool(self.stats)
 
 @dataclass
+class SceneStats:
+    id: str
+    stats: dict[str, TomoStats] = field(init=False)
+
+    def keys(self):
+        return self.stats.keys()
+    
+    def values(self):
+        return self.stats.values()
+    
+    def items(self):
+        return self.stats.items()
+    
+    @property
+    def bands(self) -> list[str]:
+        return list(self.keys())
+    
+    def get(self, band: str) -> TomoStats:
+        return self.tomograms.get(band)
+    
+    def add(self, stats: TomoStats, band: str, overwrite: bool = False) -> None:
+        bands = ['phh','cvv','lhh','lhv','lvh','lvv', 'phh1','phh0','cvv1','cvv0']
+        if band not in bands:
+            raise ValueError(f"Valid bands are: {bands}")
+        if band in self.bands and not overwrite:
+            raise RuntimeError(f"The SceneStats {self.id} already contained a {band} band TomoStats.")
+        self[band] = stats
+        stats.parent = self
+
+    def copy(self) -> 'SceneStats':
+        new_scene = SceneStats(id=self.id)
+        for band, stats in self.items():
+            new_scene[band] = stats.copy()
+        return new_scene
+    
+    
+    @classmethod
+    def load(cls, path: str|Path, npar: int = os.cpu_count()) -> 'SceneStats':
+        path = Path(path)
+        # Check if the path exists
+        if not path.exists():
+            raise FileNotFoundError(f"'{path}' not found. Check the path or file permissions.")
+        # Check if the path is a .tomo directory
+        if not path.is_dir() or not path.suffix == ".tomo":
+            raise ValueError(f"'{path}' is not a valid .tomo directory.")
+        
+        scene_stats = cls(id=path.stem)
+
+        bands = [band for band in path.iterdir() if band.is_dir() and band.name in 
+                 ['phh','cvv','lhh','lhv','lvh','lvv', 'phh1','phh0','cvv1','cvv0']]
+        with ThreadPoolExecutor(max_workers = npar) as executor:
+            future_stats = {executor.submit(TomoStats.load, parent=scene_stats, path=band, cached=True): band for band in bands}
+            for future in as_completed(future_stats):
+                band = future_stats[future]
+                try:
+                    stats = future.result()
+                    scene_stats[band] = stats
+                except Exception as e:
+                    warn(f"Failed to load {band}: {e}")
+
+        return scene_stats
+    
+@dataclass
 class TomoInfo:
     band: str = None
     width: float = None
@@ -903,17 +1004,15 @@ class TomoInfo:
         return self._slices.copy()
     
     @property
-    def parameters(self):
+    def info(self):
         # Get band specific parameters from the parent TomoScene
         if self._scene is None:
             raise AttributeError("TomoInfo object has not been initialized as a part of a TomoScene")
-        if self.band in ('phh', 'phh1', 'phh0'):
-            band = 'P-band'
-        if self.band in ('lhh', 'lhv', 'lvh', 'lvv'):
-            band = 'L-band'
-        if self.band in ('cvv', 'cvv1', 'cvv0'):
             band = 'C-band'
-        return self._scene.parameters[band]
+        return self._scene.info
+
+    def update(self) -> None:
+        self.masks.update()
 
     @classmethod
     def forge(cls, slices: SliceInfo, multilook: int = 1, sigma_xi: float = 0.9, 
@@ -1089,20 +1188,16 @@ class TomoInfo:
         )
         # Load slices
         slice_directory = path / '.slices'
-        tomo_info._slices =  SliceInfo.scan(slice_directory)
-
-        # Check if paired band
-        if band in ['phh', 'cvv']:
-            tomo_info._slices.pair()
+        tomo_info._slices = SliceInfo.scan(slice_directory)
         
         # Set masks
         if cached:
             # Construct full path to the cached_masks subdirectory
-            masks_dir = os.path.join(path, 'cached_masks')
-            if not os.path.isdir(masks_dir):
-                raise NotADirectoryError("Cached masks directory {masks_dir} is not a directory.")
+            masks_dir = path / 'cached_masks'
+            if not masks_dir.is_dir():
+                raise NotADirectoryError(f"Cached masks directory {masks_dir} is not a directory.")
             # Load the cached directory
-            tomo_info.masks = restore_cache(masks_dir)
+            tomo_info.masks.read(masks_dir)
         else:
             # Load masks from the TOMOMASKS folder
             tomo_info.masks.update()
@@ -1278,6 +1373,11 @@ class TomoScene:
     def keys(self):
         return self.tomograms.keys()
 
+    def update(self) -> None:
+        for tomo in self.values():
+            tomo.update()
+        
+    @property
     def bands(self) -> list[str]:
         return list(self.keys())
     
@@ -1416,6 +1516,10 @@ class TomoScenes:
         for i, scene in enumerate(self):
             print(f"\t{i}: {scene.id} with bands {scene.bands}")
     
+    def update(self):
+        for scene in self.values():
+            scene.update()
+    
     @classmethod
     def load(self, path: str|Path = ".", cached: bool = False, npar: int = os.cpu_count) -> 'TomoScenes':
         path = Path(path)
@@ -1424,7 +1528,8 @@ class TomoScenes:
             tomo_dirs = [d for d in path.iterdir() if d.is_dir() and d.suffix == '.tomo']
 
             with ThreadPoolExecutor(max_workers=npar) as executor:
-                future_to_path = {executor.submit(TomoScene.load, tomo_path, cached=cached): tomo_path for tomo_path in tomo_dirs}
+                interior_npar = npar // len(tomo_dirs)
+                future_to_path = {executor.submit(TomoScene.load, tomo_path, cached=cached, npar=interior_npar): tomo_path for tomo_path in tomo_dirs}
                 for future in as_completed(future_to_path):
                     tomo_path = future_to_path[future]
                     try:
@@ -1578,8 +1683,8 @@ class TomoScenes:
             return False
         return all(scene in other.scenes for scene in self.scenes) and len(self) == len(other)
 
-### Helper functions
-# Regrouping a grouped SliceInfo
+# Helper functions
+## Regrouping a grouped SliceInfo
 def regroup(grouped_dict: Dict[str,SliceInfo], keys: str | list[str], list: bool = False):
     regrouped = defaultdict(lambda: defaultdict(SliceInfo))
 
@@ -1599,7 +1704,7 @@ def regroup(grouped_dict: Dict[str,SliceInfo], keys: str | list[str], list: bool
         result = regrouped
     return result
 
-# Calculate vres from SliceInfo
+## Calculate vres from SliceInfo
 def calculate_vres(slices: SliceInfo) -> float | None:
     height = slices.get('height')
     bottom = height[0]
@@ -1618,7 +1723,7 @@ def calculate_vres(slices: SliceInfo) -> float | None:
         vres = None
         warn("No uniform vertical sampling frequency could be found.")
 
-# Parsing a filename for ImageInfo
+## Parsing a filename for ImageInfo
 def parse_filename(path: str) -> ImageInfo:
     p = Path(path)
     default = ImageInfo(filename=p.name, folder=p.parent)
@@ -1679,7 +1784,84 @@ def parse_filename(path: str) -> ImageInfo:
 
     return default
 
-# Masks utils
+## Masks helpers
+def get_masks(raster_profile: Profile, multilooked_profile: Profile, 
+              user_mask: str | Path = "") -> dict[str,list[Mask]]:
+    """
+    Generate binary masks from shapefiles using rasterio and geopandas.
+
+    Parameters:
+    - mask_dirs: list of directories containing .shp files
+    - raster_profile: rasterio profile dictionary (contains raster size, dtype, etc.)
+    - raster_transform: rasterio transform object
+
+    Returns:
+    - List of dictionaries with keys 'mask' (binary np.ndarray) and 'name' (shapename)
+    """
+    mask_paths = Settings().MASKS
+    if user_mask:
+        mask_paths.append(user_mask)
+    masks = defaultdict(list)
+
+    for path in mask_paths:
+        # Find all .shp files in the directory
+        if path.is_dir():
+            shapefiles = path.rglob("*.shp")
+        elif path.suffix == ".shp":
+            shapefiles = [path]
+        else:
+            continue
+
+        for shp_path in shapefiles:
+            # Read shapefile using geopandas
+            gdf = gpd.read_file(shp_path)
+            shapename = shp_path.stem
+
+            # Loop through each shape in the shapefile
+            for idx, row in gdf.iterrows():
+                geometry = row.geometry
+
+                # Create a binary mask using rasterio.features.rasterize
+                mask = rasterize(
+                    [(geometry, 1)],
+                    out_shape=(raster_profile['height'], raster_profile['width']),
+                    transform=raster_profile['transform'],
+                    fill=0,
+                    dtype='uint8'
+                ).astype(bool)
+
+                if not np.any(mask):
+                    continue        # This shape does not intersect raster
+
+                # Create multilooked binary mask
+                multilooked = rasterize(
+                    [(geometry, 1)],
+                    out_shape=(multilooked_profile['height'], multilooked_profile['width']),
+                    transform=multilooked_profile['transform'],
+                    fill=0,
+                    dtype='uint8'
+                ).astype(bool)
+
+                # Generate a shapename
+                shape_id = row.get('id', idx)
+
+                # Generate metadata
+                metadata = {
+                    'source': shp_path,
+                    'shape_id': shape_id,
+                    'timestamp': datetime.now().isoformat(timespec='seconds'),
+                    'bounding_box': geometry.bounds,
+                    'generated_on': socket.gethostname(),
+                    'profile': str(raster_profile),
+                    'multilooked': str(multilooked_profile)
+                }
+
+                # Append the mask and name to the list
+                masks[shapename].append(Mask(name=shapename, id=shape_id, mask=mask, 
+                                             multilooked=multilooked, metadata=metadata))
+
+    return masks
+
 def cache_masks(masks: dict[str,list[Mask]], folder: str|Path = 'cached_masks'):
     """
     Save each mask's numpy array and metadata to a folder.
@@ -1712,7 +1894,7 @@ def cache_masks(masks: dict[str,list[Mask]], folder: str|Path = 'cached_masks'):
             with open(metadata_path, 'w') as f:
                 json.dump(mask_obj.metadata, f, indent=4)
 
-def restore_cache(folder: str|Path ='cached_masks') -> dict[str,list[Mask]]:
+def restore_cache(folder: str|Path = 'cached_masks') -> defaultdict[str,list[Mask]]:
     """
     Load cached masks from a folder containing .npy and .json files.
     Returns a list of Mask objects with mask array and metadata restored.
@@ -1753,7 +1935,7 @@ def restore_cache(folder: str|Path ='cached_masks') -> dict[str,list[Mask]]:
 
     return masks
 
-### Orchestrating functions
+# Orchestrating functions
 def sliceinfo(path: str|Path = '.', filter: ImageInfo = None, read: bool = False,
               npar: int = os.cpu_count()) -> SliceInfo:
     p = Path(path)
@@ -1830,17 +2012,13 @@ def tomoload(path: str = '.', cached: bool = True, npar: int = os.cpu_count()) -
     #   |-- ...
 
     # Ensure path is the full path
-    if not os.path.isabs(path):
-        path = os.path.abspath(path)
+    path = Path(path)
 
     # If path is a single .tomo directory
-    if path.endswith('.tomo'):
+    if path.suffix == '.tomo':
         print("Returning single TomoScene.")
-        return TomoScene.load(path,cached=cached)
+        return TomoScene.load(path,cached=cached, npar=npar)
     # If path is a folder containing multiple .tomo directories
     tomo_scenes = TomoScenes.load(path=path, cached=cached, npar=npar)
-    if len(tomo_scenes) == 1:
-        print("Returning single TomoScene.")
-        return tomo_scenes[0]
 
     return tomo_scenes if tomo_scenes else None

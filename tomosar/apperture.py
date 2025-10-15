@@ -11,7 +11,7 @@ import matplotlib.pyplot as plt
 from matplotlib.figure import Figure
 import re
 
-from .config import DEPRESSION_ANGLE, Frequencies, Beam
+from .config import Frequencies, Beam
 from .utils import warn, normalized_rmse, linear_model_str, combine_stats, compute_stats, bin_by_angle, update_nested_dict, invert_nested_dict, format_duration
 FREQUENCIES = Frequencies()
 BEAM = Beam()
@@ -430,9 +430,9 @@ def calculate_sar_parameters(binned_matrices: dict[str,np.ndarray], angle_key: s
         sar_parameters[band]['HRes (m)'] = 1.12 * c / (f * 2*np.pi * np.sin(psi0)) # Horizontal -3 dB resolution (nominal)
         sar_parameters[band]['HoA (m)'] = shapes['n_turns'] * np.sin(psi0) * c * p0 / (2 * l * f) # Height of ambiguity
     # Calculate beam shape dependent parametrs
-    for (band, pol), bw in BEAM.zip():
-        theta_far = np.deg2rad((DEPRESSION_ANGLE - bw/2)) # Far-range depression angle
-        theta_near = np.deg2rad((90 - DEPRESSION_ANGLE - bw/2)) # Near-range depression angle
+    for (band, pol), bw, da in BEAM.zip():
+        theta_far = np.deg2rad((da - bw/2)) # Far-range depression angle
+        theta_near = np.deg2rad((90 - da - bw/2)) # Near-range depression angle
         r1 = np.maximum(0, shapes['flight_alt_bot'] / np.tan(theta_far) - shapes['radius_bot']) # Limit at the base of the flight path
         r2 = np.maximum(0, shapes['radius_top'] - shapes['flight_alt_top'] * np.tan(theta_near)) # Limit at the top of the flight path 
         horizonx = theta_far < 0 # The beam crosses the horizon
@@ -587,9 +587,9 @@ def _predict_sar_parameters(models: dict, phi: np.ndarray, n_turns: int) -> dict
             previous_upper_bound = upper_bound    
         predictions[band]['BWC'] = bwc / bz
         predictions[band]['BWG'] = gaps / (n_turns - 1)
-    for (band, pol), beamwidth in BEAM.zip():
-        theta_far = np.pi * ((DEPRESSION_ANGLE - beamwidth/2))/180 # Far-range depression angle in radians
-        theta_near = np.pi * ((90 - DEPRESSION_ANGLE - beamwidth/2))/180 # Near-range depression angle in radians 
+    for (band, pol), beamwidth, da in BEAM.zip():
+        theta_far = np.pi * ((da - beamwidth/2))/180 # Far-range depression angle in radians
+        theta_near = np.pi * ((90 - da - beamwidth/2))/180 # Near-range depression angle in radians 
         r1 = (m - b * (phi + 360*n))/np.tan(theta_far) - (k + a * (phi + 360*n))
         r2 = (k + a * phi) - (m - b * phi)*np.tan(theta_near)
         horizonx = theta_far < 0
@@ -665,9 +665,9 @@ def model_sar_parameters(models: dict, n_turns: int, angle_name: str = "phi") ->
             previous_upper_bound = upper_bound    
         expr[band]['BWC'] = bwc / bz
         expr[band]['BWG'] = gaps / (n_turns - 1)
-    for (band, pol), beamwidth in BEAM.zip():
-        theta_far = sp.pi * ((DEPRESSION_ANGLE - beamwidth/2))/180 # Far-range depression angle in radians
-        theta_near = sp.pi * ((90 - DEPRESSION_ANGLE - beamwidth/2))/180 # Near-range depression angle in radians 
+    for (band, pol), beamwidth, da in BEAM.zip():
+        theta_far = sp.pi * ((da - beamwidth/2))/180 # Far-range depression angle in radians
+        theta_near = sp.pi * ((90 - da - beamwidth/2))/180 # Near-range depression angle in radians 
         r1 = (m - b * (phi + 360*n))/sp.tan(theta_far) - (k + a * (phi + 360*n))
         r2 = (k + a * phi) - (m - b * phi)*sp.tan(theta_near)
         horizonx = theta_far < 0

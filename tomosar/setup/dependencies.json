@@ -90,6 +90,30 @@
 				"NA": []
 			}
 		}
+	},
+	"gdalbuildvrt": {
+		"Usage": "Generating VRTs for DEMS and CANOPIES",
+		"Source": "Install gdal through your package manager",
+		"Used_by": {
+			"module": [
+				"tomosar.build_vrt"
+			],
+			"tools": {
+				"tomoprocess": ["slice"]
+			}
+		}
+	},
+	"gdalwarp": {
+		"Usage": "Extracting reference rasters from VRT",
+		"Source": "Install gdal through your package manager",
+		"Used_by": {
+			"module": [
+				"tomosar.generate_raster"
+			],
+			"tools": {
+				"tomoprocess": ["slice"]
+			}
+		}
 	}
 }
 

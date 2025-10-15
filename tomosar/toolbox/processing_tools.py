@@ -4,10 +4,11 @@ import os
 import time as Time
 import datetime
 
-from tomosar.gnss import fetch_swepos, station_ppp
-from tomosar.trackfinding import trackfinder as run_trackfinder
-from tomosar import ImageInfo, TomoScenes, interactive_console
-from tomosar.forging import tomoforge
+from ..gnss import fetch_swepos, station_ppp
+from ..trackfinding import trackfinder as run_trackfinder
+from .. import ImageInfo, TomoScenes
+from ..utils import interactive_console
+from ..forging import tomoforge
 
 @click.command()
 @click.argument("filepath", type=click.Path(exists=True, path_type=Path))

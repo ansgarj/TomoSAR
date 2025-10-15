@@ -1,37 +1,11 @@
 import click
 import compileall
-import tomosar
 import shutil
+import re
 from pathlib import Path
 
-from tomosar.utils import warn
-from tomosar.binaries import check_required_binaries, run
-
-PACKAGE_PATH = Path(tomosar.__file__).parent
-PROJECT_PATH = Path(tomosar.__file__).parent.parent
-
-def pyproject_changed() -> bool:
-    """Checks whether pyproject.toml was changed in the last merge (pull)"""
-    try:
-        # Run the git diff-tree command
-        result = run(["git", "diff-tree", "-r", "--name-only", "--no-commit-id", "ORIG_HEAD", "HEAD"])
-        
-        # Check if pyproject.toml is in the output
-        changed_files = result.stdout.splitlines()
-        return "pyproject.toml" in changed_files
-
-    except RuntimeError as e:
-        try: 
-            # Run git diff-tree against last commit instead
-            result =run(["git", "diff-tree", "-r", "--name-only", "--no-commit-id", "HEAD~1", "HEAD"])
-
-            # Check if pyproject.toml is in the output
-            changed_files = result.stdout.splitlines()
-            return "pyproject.toml" in changed_files
-        
-        except RuntimeError as e:
-            warn(e)
-            return False
+from ..binaries import check_required_binaries, run
+from ..config import PACKAGE_PATH, PROJECT_PATH, SETTINGS_PATH, save_default
 
 def warm_cache():
     """Pre-warm __pycache__ by compiling all modules."""
@@ -40,7 +14,7 @@ def warm_cache():
     print(f"__pycache__ warmed for {PACKAGE_PATH}")
 
 @click.command()
-def setup():
+def setup() -> None:
     """Performs TomoSAR setup"""
     post_merge_path = PROJECT_PATH / ".git" / "hooks" / "post-merge"
     pre_push_path = PROJECT_PATH / ".git" / "hooks" / "pre-push"
@@ -50,17 +24,20 @@ def setup():
     if not pre_push_path.exists():
         shutil.copy2(PROJECT_PATH / "setup" / "pre-push", pre_push_path)
         print("Project pre-push hook installed.")
+    if not SETTINGS_PATH.exists():
+        save_default()
+        print("Default settings enabled (run tomosar settings to view)")
     run(["pip", "install", "-e", PROJECT_PATH])
     print("Installation updated.")
     check_required_binaries()
     warm_cache()
 
 @click.command()
-def dependencies():
+def dependencies() -> None:
     """Scan PATH for required binaries"""
     check_required_binaries()
 
 @click.command()
-def warmup():
+def warmup() -> None:
     """Pre-warm __pycache__ by compiling all modules"""
     warm_cache()

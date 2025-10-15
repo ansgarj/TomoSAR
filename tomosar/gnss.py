@@ -8,15 +8,13 @@ from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from ftplib import FTP
 import time
-import subprocess
 import re
-from collections import defaultdict
 import numpy as np
 import matplotlib.pyplot as plt
 import json
 
-from .utils import prompt_ftp_login, data_path, gunzip
-from .binaries import run
+from .utils import prompt_ftp_login, gunzip
+from .binaries import crx2rnx, merge_rnx, merge_eph, ubx2rnx, ppp, resource
 
 def extract_rnx_info(file_path):
     """
@@ -100,7 +98,7 @@ def find_station(rover_pos, stations_path: str|Path = None):
     """
 
     # Load the station coordinates
-    with data_path(stations_path, 'SWEPOS_coordinates.csv') as f:
+    with resource(stations_path, 'SWEPOS_COORDINATES') as f:
         df = pd.read_csv(f, encoding='utf-8-sig')
 
     # Define Euclidean distance
@@ -126,12 +124,13 @@ def fetch_swepos_files(
     end_time: datetime,
     output_dir: str|Path,
     dry_run: bool = False,
+    fetch_nav: bool = False,
     max_workers: int = 10,
     max_retries: int = 3
 ):
 
     # Log into FTP server
-    ftp, ftp_user, ftp_pass = prompt_ftp_login(server="ftp-sweposdata.lm.se", max_attempts=3, default_user="SLUfjarrPostProcess")
+    ftp, ftp_user, ftp_pass = prompt_ftp_login(server="ftp-sweposdata.lm.se", max_attempts=3, default_user="")
 
     # Prepare output directory
     output_dir = Path(output_dir)
@@ -152,6 +151,8 @@ def fetch_swepos_files(
             files = ftp.nlst()
             # Find all obs files for this station and hour
             station_files = [f for f in files if f.startswith(station_code) and (f.endswith("MO.crx.gz") or f.endswith("O.rnx.gz"))]
+            if fetch_nav:
+                station_files.extend([f for f in files if f.startswith(station_code) and (f.endswith("MN.crx.gz") or f.endswith("N.rnx.gz"))])
             # Group by file type (everything after station code and before .gz)
             file_types = set()
             for f in station_files:
@@ -222,7 +223,7 @@ def fetch_swepos_files(
                     decompressed_path = gunzip(output_dir / filename)
                     decompressed_path = (output_dir / filename).with_suffix('')  # removes .gz
                     if decompressed_path.suffix == '.crx':
-                        run(["crx2rnx", "-d", str(decompressed_path)])
+                        crx2rnx(decompressed_path)
                 else:
                     tqdm.write(f"Failed: {filename}")
                     failed += 1
@@ -232,89 +233,32 @@ def fetch_swepos_files(
 
 def merge_swepos_rinex(data_dir):
     data_path = Path(data_dir)
-    rnx_files = sorted(data_path.glob("*.rnx"))
-    def _generate_merged_filename(files):
-        pattern = re.compile(
-            r"^(?P<station>[A-Z0-9]{9})_(?P<source>[SR])_(?P<datetime>\d{11})"
-        )
-        grouped = defaultdict(set)
-        for f in files:
-            match = pattern.match(f.name)
-            if match:
-                key = (match.group("station"), match.group("source"))
-                grouped[key].add(int(match.group("datetime")))
-
-        descriptive_filenames = []
-        for (station, source), datetimes in grouped.items():
-            datetime = min(datetimes)
-            hours = len(datetimes)
-            obs_filename = f"{station}_{source}_{datetime}_{hours:02}H_01S_MO.obs"
-            descriptive_filenames.append(obs_filename)
-        if len(descriptive_filenames) > 1:
-            raise RuntimeError(f"Data from multiple stations or sources in {data_dir}. Merging aborted.")
-        return descriptive_filenames[0]
+    obs_files = sorted(data_path.glob("*O.rnx"))
+    nav_files = sorted(data_path.glob("*N.rnx"))
 
     # Merge rinex files    
-    if rnx_files:
-        merged_obs = data_path.parent / _generate_merged_filename(rnx_files)
-        print(f"Merging observation files > {merged_obs}", flush=True)
-        run(["gfzrnx", "-q", "-finp"] + [str(f) for f in rnx_files] + ["-fout", str(merged_obs)])
+    if obs_files:
+        merged_obs = merge_rnx(obs_files)
+    else:
+        merged_obs = None
 
-    print("Merging complete.")
+    if nav_files:
+        merged_nav = merge_rnx(nav_files)
+    else:
+        merged_nav = None
+
+    return merged_obs, merged_nav
 
 def merge_ephemeris(data_dir):
     data_path = Path(data_dir)
-    sp3_files = sorted(data_path.glob("*.SP3"))
-    clk_files = sorted(data_path.glob("*.CLK"))
-    def _generate_merged_filenames(files):
-        pattern = re.compile(
-            r"^(?P<source>[A-Z0-9]{10})_(?P<datetime>\d{11})_(?P<duration>\d{2}[SMHD])_(?P<freq>\d{2}[SMHD])_(?P<type>[A-Z]{3})\.(?P<ext>[A-Z0-9]{3})$"
-        )
-        units = re.compile(
-            r"(?P<number>\d{2})(?P<unit>[SMHD])"
-        )
-        grouped = defaultdict(set)
-        for f in files:
-            if (match := pattern.match(f.name)):
-                key = (
-                    match.group("source"),
-                    match.group("freq"),
-                    match.group("type"),
-                    match.group("duration"),
-                    match.group("ext")
-                )
-                grouped[key].add(int(match.group("datetime")))
-
-        descriptive_filenames = []
-        for (source, frequency, type, duration, ext), datetimes in grouped.items():
-            datetime = min(datetimes)
-            if (match := units.match(duration)):
-                dur = int(match.group("number"))
-                dur_unit = match.group("unit")
-            else:
-                raise RuntimeError(f"Failed to parse filenames: {files}")
-            no_files = len(datetimes)
-            dur = dur * no_files
-            sp3_filename = f"{source}_{datetime}_{dur:02}{dur_unit}_{frequency}_{type}.{ext}"
-            descriptive_filenames.append(sp3_filename)
-        if len(descriptive_filenames) > 1:
-            raise RuntimeError(f"Unable to merge files. Merging aborted.")
-        return descriptive_filenames[0]
+    eph_files = sorted(data_path.glob("*.SP3"))
+    eph_files.extend(sorted(data_path.glob("*.CLK")))
 
 
-    if sp3_files:
-        merged_sp3 = data_path.parent / _generate_merged_filenames(sp3_files)
-        print(f"Merging .SP3 files > {merged_sp3}", flush=True)
-        result = subprocess.run(["cat"] + [f for f in sp3_files], capture_output=True, text=True, check=True)
-        merged_sp3.write_text(result.stdout)
+    if eph_files:
+        merged_sp3, merged_clk = merge_eph(eph_files)
 
-    if clk_files:
-        merged_clk = data_path.parent / _generate_merged_filenames(clk_files)
-        print(f"Merging .CLK files > {merged_clk}", flush=True)
-        result = subprocess.run(["cat"] + [f for f in clk_files], capture_output=True, text=True, check=True)
-        merged_clk.write_text(result.stdout)
-
-    print("Merging complete.")
+    return merged_sp3, merged_clk
 
 def fetch_sp3_clk(
     start_time: datetime,
@@ -645,8 +589,7 @@ def fetch_swepos(
     nav_path = filepath.with_suffix(".nav")
     obs_path = filepath.with_suffix(".obs")
     if not obs_path.exists() or not nav_path.exists() or not sbs_path.exists():
-        run(["convbin", "-r", "ubx", "-od", "-os", "-o", str(obs_path), "-n", str(nav_path), 
-                        "-s", str(sbs_path), filepath.resolve()])
+        ubx2rnx(filepath)
     tmp_dir = output_dir / "TMP"
    
     if not cont:
@@ -727,7 +670,7 @@ def station_ppp(
     output_dir.mkdir(exist_ok=True)
 
     obs_path = next(f for f in data_dir.glob("*") if re.match(r".*\.(\d{2}O|obs)$", f.name))
-    navglo_path = next(f for f in data_dir.glob("*") if re.match(r".*\.(\d{2}G|glo)$", f.name))
+    navglo_path = next(f for f in data_dir.glob("*") if re.match(r".*\.(\d{2}G|glo|d{2}N|nav)$", f.name))
     if not obs_path:
         raise FileNotFoundError(f"OBS file missing in {data_dir}")
     
@@ -753,37 +696,15 @@ def station_ppp(
     if not out_path.exists() or not cont:
         sp3_file = next(f for f in output_dir.glob("*.SP3"))
         clk_file = next(f for f in output_dir.glob("*.CLK"))
-        with data_path(atx_path, "igs20_2385.atx") as atx:
-            with data_path(antrec_path, "CHCI83.atx") as receiver:
-                if navglo_path:
-                    cmd = [
-                        'glab',
-                        '-input:obs', obs_path,
-                        '-input:navglo', navglo_path,
-                        '-input:ant', atx.name,
-                        '-input:antrec', receiver.name,
-                        '-input:orb', sp3_file,
-                        '-input:clk', clk_file,
-                        #'-filter:backward', 
-                        '-model:recphasecenter', "1", "0", "0", "0.9",
-                        '-model:recphasecenter', "2", "0", "0", "0.9",
-                        '-model:recphasecenter', "3", "0", "0", "0.9",
-                        '-model:recphasecenter', "4", "0", "0", "0.9",
-                        '-model:recphasecenter', "5", "0", "0", "0.9",
-                    ]
-                else:
-                    cmd = [
-                        'glab',
-                        '-input:obs', obs_path,
-                        '-input:ant', atx.name,
-                        '-input:orb', sp3_file,
-                        '-input:clk', clk_file,
-                        #'-filter:backward', 
-                        #'--model:recphasecenter',
-                    ]
-                print(*cmd)
-                result = run(cmd)
-                out_path.write_text(result.stdout)
+        ppp(
+            obs_file=obs_path,
+            sp3_file=sp3_file,
+            clk_file=clk_file,
+            out_path=out_path,
+            navglo_file=navglo_path,
+            atx_file=atx_path,
+            antrec_file=antrec_path
+        )
     
     if not out_path.exists():
         raise FileNotFoundError(f"Cannot find generated out file: {out_path}")
