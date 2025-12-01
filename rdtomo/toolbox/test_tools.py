@@ -7,7 +7,7 @@ from matplotlib import pyplot as plt
 
 from ..gnss import fetch_swepos, station_ppp as run_ppp, ppk as run_ppk, ubx2rnx
 from ..manager import resource
-from ..position import Pos
+from ..coords import Pos
 from ..config import LOCAL
 from ..data import DataDir
 

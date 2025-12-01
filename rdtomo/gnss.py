@@ -20,7 +20,7 @@ from .version import version
 from .config import Settings
 from .utils import prompt_ftp_login, gunzip, warn, local, string_sub, date_to_gps_week, gps_week_to_date, leap_seconds, parse_datetime_string
 from .manager import run, tmp, resource, modify_config
-from .position import Pos, geo_to_ecef, ecef_to_geo, ecef_to_enu, change_rf, geo_to_map
+from .coords import Pos, geo_to_ecef, ecef_to_geo
 
 # Named functions for binary executables
 def crx2rnx(crx_file: str|Path) -> Path:

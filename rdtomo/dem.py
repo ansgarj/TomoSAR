@@ -6,7 +6,7 @@ import rasterio
 from pyproj import Transformer
 
 from .utils import leap_seconds, warn
-from .position import geo_to_ecef, ecef_to_geo, change_rf
+from .coords import geo_to_ecef, ecef_to_geo, change_rf
 from .config import Settings, LOCAL
 from .manager import build_vrt
 

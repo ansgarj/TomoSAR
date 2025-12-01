@@ -17,7 +17,7 @@ from .manager import tmp, read_only, DirExistsError, DirNotFoundError
 from .gnss import reachz2rnx, fetch_swepos, extract_rnx_info, station_ppp, ppk, ubx2rnx, splice_sp3, splice_clk, splice_inx, chc2rnx, reach2rnx, generate_mocoref
 from .core import TomoScene, TomoScenes, Scenes, tomoinfo
 from .apperture import SARModel
-from .position import Pos
+from .coords import Pos
 
 #
 # Abstract class that dispatches to DataDir, ProcessingDir, TomoDir or TomoArchive
