@@ -2,22 +2,13 @@
 
 All CLI tools in the **rd-tomo** toolbox are accessed as subcommands of the `rdtomo` command which is installed by `pip` when you install the `rdtomo` module.  Run `rdtomo manual` to print this manual and `rdtomo changelog` to print the changelog. You can also add `--help` to `rdtomo` or any of the subcommands for basic syntax.
 
-## `setup`
-Running `rdtomo setup` ensures that your current installation is up to date. It makes sure all Git hooks are installed, checks if the `pyproject.toml` file has changed since last time `make install` or `make update` was run, and runs `make update` if necessary (or prompts you to do it if it fails), updates the version file, checks if all required binaries can be found in the `PATH` and pre-warms the Python cache.
+## Main Tools
+These are the main tools used in a normal processing pipeline, or for standard _rd-tomo_ use, in the current implementation. Once more tools are implemented, this list may be updated.
 
-If the Git hooks are installed (as they are if you run `make install` or `rdtomo setup`) then `rdtomo setup` is automatically run when you pull and push.
+### `settings`
+Running `rdtomo settings` prints the current settings. These are stored locally. The commands `rdtomo set/clear/add/remove` allow you to modify your settings, and `rdtomo default` resets to default values. The VERBOSE setting is toggled by `rdtomo verbose`.  
 
-You can perform the dependency check independently by running `rdtomo dependencies` and you can always pre-warm the Python cache by running `rdtomo warmup`.
-
-## `version`
-Running `rdtomo version` prints the current installed version. If the dynamic versioning differs, it will warn and prompt you to run `rdtomo setup` to update the versioning. This can safely be ignored if you are working on your own code. 
-
-## `settings`
-Running `rdtomo settings` prints the current settings. These are stored locally. The commands `rdtomo set/clear/add/remove` allow you to modify your settings, and `rdtomo default` resets to default values. The VERBOSE setting is toggled by `rdtomo verbose`. 
-
-**Note**: `null` values indicate an internal file. You can change this to use your own file, and reset by `rdtomo clear`. 
-
-## `init`
+### `init`
 Running `rdtomo init` Searches recursively to find matching files:
 - Drone GNSS .bin and .log;
 - Drone IMU .bin and .log;
@@ -35,30 +26,59 @@ The files are converted where applicable and copied/moved into a processing dire
 
 Note that rdtomo init can also be run inside a processing directory, in which case it simply initiates preprocessing \[ONLY GNSS IMPLEMENTED\]. Any directory inside the settings specified PROCESSING_DIRS is assumed to be a processing directory, and any directory outside is by default assumed to be a data directory (this behaviour can be overridden by the --processing option).
 
-## `trackfinder`
+### `trackfinder`
 Running `rdtomo trackfinder` on a `.moco` CSV file correctly identifies all tested flight timestamps and generates the `radar[...].inf` file for spiral flight processing. Can be used to generate the correct timestamps for linear flights by `trackfinder -l` or more generally `trackfinder -l X`. 
 
-## `forge`
+### `forge`
 Running `rdtomo forge` scans paths for slice files and intelligently combines them into _Tomogram Directories_, ordered by actual spiral flight and radar band. If multiple tomograms can be constructed for a single spiral and radar band, `rdtomo forge` will warn and construct the first tomogram it finds. This is because the name of the _Tomogram Directories_ generated contain an ID constructed from the flight timestamp and the Spiral ID, along with an optional tag. Multiple tomograms for the same spiral and band would therefore overwrite each other. To filter slices see `rdtomo forge --help`.
 
 **Note**: this function will be included in the planned  `rdtomo process` command, but will always remain a standalone tool as well.
 
-## `fetch-swepos`
+### `load`
+Running `rdtomo load` loads any number of _Data Directories_, _Processing Directories_, _Tomogram Directories_ or _Tomogram Archives_ into an interactive Python Console. Each directory path passed will be loaded as the respective Python object:
+1. A directory containing a `rawdata` subfolder is loaded as a _Processing Directory_ (`ProcessingDir` object), else
+2. A directory ending with the `.tomo` suffix is loaded as a _Tomogram Directory_ (`TomoDir` object), else
+3. A directory containing at least one `.tomo` directory is loaded as a _Tomogram Archive_ (`TomoArhcive` object), else
+4. The directory is loaded as a _Data Directory_ (`DataDir`) object.
+All paths are opened using the `open()` method, such that:
+5. A `ProcessingDir` object stores the current processing state, including `SliceInfo` objects with the current slices,
+6. A `TomoDir` object loads the stored `TomoScene`,
+7. A `TomoArchive` object loads all included `TomoScene` objects into a `TomoScenes` object,
+8. A `DataDir` object loads and extracts a `DroneData` object with the files needed to initiate preprocessing.
+
+Possible uses include:
+1. Verifying processing state (`--info` can do this quicker), programmatically _forging_ new `.tomo` directories with more control,
+2. Adding or removing slices, updating masks, programmatically inspecting the `TomoScene`, viewing statistics or tomograms \[NOT IMPLEMENTED\] (once implemented `rdtomo view` can be used to do this non-programmatically),
+3. Inspecting the archive, manipulating individual `.tomo` directories contained inside it (see above), launching the viewer (again, this can be done non-programmaticaly using `rdtomo view`) for the entire archive \[NOT IMPLEMENTED\],
+4. Verifying content before initiating preprocessing (see also `rdtomo init --dry`), modifying the data used for preprocessing without modifying the _Data Directory_.
+
+##  Secondary Tools
+These secondary tools are normally not needed, but are provided for convenience, in case other needs arise.
+
+### `setup`
+Running `rdtomo setup` ensures that your current installation is up to date. It makes sure all Git hooks are installed, checks if the `pyproject.toml` file has changed since last time `make install` or `make update` was run, and runs `make update` if necessary (or prompts you to do it if it fails), updates the version file, checks if all required binaries can be found in the `PATH` and pre-warms the Python cache.
+
+If the Git hooks are installed (as they are if you run `make install` or `rdtomo setup`) then `rdtomo setup` is automatically run when you pull and push.
+
+You can perform the dependency check independently by running `rdtomo dependencies` and you can always pre-warm the Python cache by running `rdtomo warmup`.
+### `fetch-swepos`
 Running `rdtomo fetch-swepos` on a drone `gnss_logger_dat-[...].bin` file or RINEX observation file produced from it will find and download matching RINEX observation files from the nearest station in the _Swepos_ network.
 
 _Swepos_ stations usually benefit from a lower _elevation mask_ than the mobile GNSS: if you run `rdtomo init --swepos` and don't specify the elevation mask manually, `rdtomo init` will use a lower default, but if you fetch _Swepos_ data first manually with `rdtomo fetch-swepos` then you may benefit from specifying a lower elevation mask when running `rdtomo init`.
 
-**Note**: this can be used as a fallback if we lack GNSS base station files.
+**Note**: this can be used as a fallback if we lack GNSS base station files, but can be done as a part of `rdtomo init` by running with the `--swepos` flag. 
 
-## `station-ppp`
+### `station-ppp`
 Running `rdtomo station-ppp` on a GNSS base station RINEX observation file will run static PPP post-processing on the observation file to determine a better approximation of its position than what is provided in the RINEX header, and will update the header by default.
 
-**Note**: this can be used as a fallback if we lack measurements of the GNSS base station position, but lacking absolute callibration data will introduce uncertainty.
+**Note**: this can be used as a fallback if we lack measurements of the GNSS base station position, but can be done as a part of `rdtomo init` by running with the `--ppp` flag.
 
-## `mocoref`
+### `mocoref`
 Running `rdtomo mocoref` on a data file (CSV, JSON or LLH) generates a `mocoref.moco` file. For a CSV file it defaults to the first line, but this can be changed with `--line`, and reads columns with names matching the names specified in the settings. A JSON file is assumed to contain a dict with the keys specified in the settings. A LLH log is assumed to have no header and to have columns matching the LLH log from the Emlid Reach RS3. 
 
-## `extract-reach`
+**Note**: This is done as a part if `rdtomo init`. 
+
+### `extract-reach`
 Running `rdtomo extract-reach` extracts a Reach ZIP archive to produce:
 - A RINEX OBS file for a single site,
 - A mocoref.moco for the OBS file, and
@@ -66,21 +86,21 @@ Running `rdtomo extract-reach` extracts a Reach ZIP archive to produce:
 
 Optionally takes a RINEX OBS file as input to extract from the archive the OBS file which has the greatest overlap with the input RINEX file. Otherwise extracts the longest segment.
 
-## `load`
-Running `rdtomo load` loads a single _Tomogram Directory_ or multiple _Tomogram Directories_ into a `TomoScenes` object, and then opens an interactive Python console with the `TomoScenes` object stored under `tomos`. It can be used as an entry point instead of having to manually import and run inside Python where path auto-completion may not work.  Running `rdtomo load --info` instead extracts and prints basic information without requiring the entire directory structure to be loaded, and then exits.
+**Note**: This is done as a part of `rdtomo init`. 
 
-## `sliceinfo`
+### `sliceinfo`
 Running `rdtomo sliceinfo` scans a directory for slice files and collects them into a `SliceInfo` object, and then opens an interactive Python console with the `SliceInfo` object stored under `slices`. It can be used as an entry point instead of having to manually import and run inside Python where path auto-completion may not work. 
 
-## `test`
-The `rdtomo test` subcommand contains additional subcommands that can be used to test e.g. config files or to verify that all third party binaries are operational. Currently available are:
+## The `rdtomo test` command
+The `rdtomo test` subcommand contains additional subcommands that can be used to test e.g. config files or to verify operational status. Currently available are:
 - `rdtomo test gnss` which tests that all GNSS processing capabilities are operational
 - `rdtomo test station-ppp` which tests `station-ppp` against ground truth as found in a `mocoref` data file
-- `rdtomo test precise-rktp` which tests RTKP post processing with precise ephemeris data against broadcast ephemeris data (optionally with specified elevation mask)
+- `rdtomo test precise-rktp` which tests RTKP post processing with precise ephemerides data against broadcast ephemeris data (optionally with specified elevation mask)
+- `rdtomo test rtkp` which tests RTKP post processing with internal additions (absolute antenna callibration, frequency limiting, dynamic precise ephemerides) against raw rtklib `rnx2rtkp`. 
 
 ## Planned additions
 1. `rdtomo process` \[**NOT IMPLEMENTED**\] chains `slice` and `forge` to generate a _Tomogram Directory_, or content for one. 
-2. `tomsoar slice` \[**NOT IMPLEMENTED**\] initiates a _backprojection_ loop to generate all slices for the specified tomogram.
+2. `rdtomo slice` \[**NOT IMPLEMENTED**\] initiates a _backprojection_ loop to generate all slices for the specified tomogram.
 3. `rdtomo view` \[**NOT IMPLEMENTED**\] contains multiple subcommands used for viewing tomograms, statistics, e.t.c 
 4. `rdtomo optimize` \[**NOT IMPLEMENTED**\] plans a flight for optimizing _nominal_ SAR parameters according to given restraints.
 5. `rdtomo plan` \[**NOT IMPLEMENTED**\] interactively models a _planned flight_ to allow validation of ideal SAR parameters across different tomograms (**Note**: this does not take into account flight instabilities that can occur during the actual flight).
