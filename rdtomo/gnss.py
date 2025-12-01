@@ -20,7 +20,7 @@ from .version import version
 from .config import Settings
 from .utils import prompt_ftp_login, gunzip, warn, local, string_sub, date_to_gps_week, gps_week_to_date, leap_seconds, parse_datetime_string
 from .manager import run, tmp, resource, modify_config
-from .transformers import geo_to_ecef, ecef_to_geo, ecef_to_enu, change_rf, geo_to_map
+from .position import Pos, geo_to_ecef, ecef_to_geo, ecef_to_enu, change_rf, geo_to_map
 
 # Named functions for binary executables
 def crx2rnx(crx_file: str|Path) -> Path:
@@ -185,14 +185,14 @@ def _split_by_site_occupation(
     """Splits a RINEX file by blocks with 'EVENT: NEW SITE OCCUPATION' lines, using the main header
     but the APPROX POSITION XYZ line updated from the new block along with FIRST OBS TIME and LAST OBS TIME.
     Returns a dict indexed by output path with the following nested keys:
-    - "APPROX POSITION XYZ": a 3-tuple of floats with the header ECEF coordinates,
+    - "APPROX POSITION XYZ": a 3-tuple of floats with the header ECEF Pos,
     - "TIME OF FIRST OBS": a datetime object representing the first obs, and
     - "TIME OF LAST OBS": a datetime object representing the last obs."""
 
     def get_metadata() -> tuple[tuple[float,float,float], datetime, datetime]:
         """Helper function to get metadata from current_position, first_observation, first_constellation, 
         current_observation and current_constellation"""
-        # Position in ECEF coordinates
+        # Position in ECEF Pos
         parts = current_position.split()
         try:
             x, y, z = map(float, parts[0:3])
@@ -447,6 +447,7 @@ def rnx2rtkp(
         sp3_file: str|Path|None = None,
         clk_file: str|Path|None = None,
         elevation_mask: float|None = None,
+        mocoref_pos: Pos|None = None,
         mocoref_file: str|Path|None = None,
         mocoref_type: str|None = None,
         mocoref_line: int = 1,
@@ -469,7 +470,9 @@ def rnx2rtkp(
         cmd.extend(['-m', elevation_mask])
     if constellations:
         cmd.extend(["-sys", ",".join(constellations), "-f", freqs])
-    if mocoref_file:
+    if mocoref_pos:
+        cmd.extend(["-r", *mocoref_pos])
+    elif mocoref_file:
         mocoref_pos, _ = generate_mocoref(mocoref_file, type=mocoref_type, line=mocoref_line, generate=False, output_frame=processing_frame)
         cmd.extend(["-r", *mocoref_pos])
     with resource(base_obs) as tmp_obs:
@@ -553,13 +556,13 @@ def glab_ppp(
 # RINEX helpers
 def extract_rnx_info(file_path: str|Path) -> tuple[datetime|None,
                                                    datetime|None,
-                                                   tuple[float, float, float],
+                                                   Pos,
                                                    tuple[float,float,float]]:
     """
     Extract start/end times and approximate position from RINEX header. Output:
     - TIME OF FIRST OBS (datetime or None): if not present in header reads from RINEX epochs
     - TIME OF LAST OBS (datetime or None): if not present in header reads from RINEX epochs
-    - APPROX POS XYZ (tuple of floats)
+    - APPROX POS XYZ (Pos object)
     - ANTENNA: DELTA H/E/N (tuple of floats)
     """
     earliest_date = datetime(year=2020, month=1, day=1,tzinfo=timezone.utc)
@@ -599,6 +602,9 @@ def extract_rnx_info(file_path: str|Path) -> tuple[datetime|None,
         start_time = get_first_rinex_timestamp(file_path)
     if end_time is None or end_time < earliest_date:
         end_time = get_last_rinex_timestamp(file_path)
+
+    # Store Pos object
+    approx_position = Pos(approx_position, epoch=start_time + (end_time - start_time)/2, frame=Settings().MOCOREF_FRAME)
     return start_time, end_time, approx_position, antenna_delta
 
 def get_first_rinex_timestamp(file_path: str|Path) -> datetime | None:
@@ -654,7 +660,7 @@ def update_rinex_position(file_path, new_coords) -> None:
                 lines.insert(i, new_line)
                 break
     
-    lines.insert(2,"THE COORDINATES HAVE BEEN UPDATED IN WGS84                  COMMENT\n")
+    lines.insert(2,"THE Pos HAVE BEEN UPDATED IN WGS84                  COMMENT\n")
 
     with open(file_path, 'w') as file:
         file.writelines(lines)
@@ -1150,8 +1156,8 @@ def find_station(rover_pos, stations_path: str|Path = None):
     If no path is provided, defaults to 'SWEPOS_koordinatlista.csv' in the project root/config_files.
     """
 
-    # Load the station coordinates
-    with resource(stations_path, 'SWEPOS_COORDINATES') as f:
+    # Load the station Pos
+    with resource(stations_path, 'SWEPOS_Pos') as f:
         df = pd.read_csv(f, encoding='utf-8-sig')
 
     # Define Euclidean distance
@@ -1311,12 +1317,15 @@ def merge_swepos_rinex(files: list[str|Path], output_dir: Path) -> tuple[Path|No
     return merged_obs, merged_nav
 
 # Read output
-def read_rnx2rtkp_out(input: str|Path, processing_frame: str = "ITRF") -> tuple[np.ndarray, float, np.ndarray]:
+def read_rnx2rtkp_out(input: str|Path, processing_frame: str = "ITRF") -> dict:
     """Parses a rnx2rtkp .pos file.
-    Returns:
-        array with the coordinates,
-        array with the GPST corresponding to the coordinates,
-        array with the quality conversion corresponding to the coordinates (Q),
+    Returns dict with keys:
+        - "Pos": Pos object with solution
+        - "SD": Standard deviation in ENU,
+        - "ration": AR ratio,
+        - "gps_week": GPS week of each point
+        - "gpst": GPST (s) of each point, as seconds into current week
+        - "quality": Q number
         """
     
     if isinstance(input, str):
@@ -1364,10 +1373,7 @@ def read_rnx2rtkp_out(input: str|Path, processing_frame: str = "ITRF") -> tuple[
     # Auto-detect coordinate columns
     results = {}
     if data.shape[1] >= 5:
-        lat = data[:, 2].T                        
-        lon = data[:, 3].T
-        h = data[:, 4].T
-        coords = np.vstack((lon, lat, h))       # LLH coordinates ITRF frame (lon, lat, h)
+        results["Pos"] = Pos.geodetic(data[:,2:5].T, lat_first=True, epoch=get_epoch(data[:, 0:2]), frame=processing_frame).reframe(Settings().TARGET_FRAME)
         results["SD"] = data[:, 7:10].T         # NEU SD
         results["ratio"] = data[:, 14]          # AR ratio
         results["gps_week"] = data[:, 0]        # GPS week
@@ -1376,25 +1382,20 @@ def read_rnx2rtkp_out(input: str|Path, processing_frame: str = "ITRF") -> tuple[
     else:
         raise ValueError(f"Unexpected format in {input}: not enough columns")
     
-    # Change to TARGET_FRAME, passing epoch array as 4th coordianate
-    st = Settings()
-    processing_frame = st.resolve_frame(processing_frame)
-    if processing_frame != st.TARGET_FRAME:
-        coords = geo_to_ecef(*coords, rf=processing_frame)
-        coords = change_rf(processing_frame, st.TARGET_FRAME, *coords, get_epoch(data[:, 0:2]))
-
-        # Convert back to geodetic in TARGET_FRAME
-        coords = ecef_to_geo(*coords)
-
-    # Change to projected coordinates
-    h = coords[2]
-    coords = geo_to_map(lon=coords[0], lat=coords[1])
-
-    results["coordinates"] = np.asarray((*coords, h)) # shape (3, n): Easting, Northing, Height
-    
     return results
 
 def read_glab_out(input: str|Path, verbose: bool = False) -> dict:
+    """Parses a glab .out file.
+    Returns dict with keys:
+        - "position": final position in ITRF
+        - "epochs": decimal year of all solution positions
+        - "epoch": nominal (median) epoch
+        - "residuals": residuals of solution from position
+        - "convergence_idx": convergence index
+        - "convergence_time": time into file for convergence
+        - "convergence_duration": duration during wich the solution had converged
+        - "total_duration": total duration for all solutions
+        """
     x, y, z = [], [], []
     err, epoch = [], []
     x_err, y_err, z_err = [], [], []
@@ -1464,34 +1465,26 @@ def read_glab_out(input: str|Path, verbose: bool = False) -> dict:
     if not conv.any():
         raise RuntimeError(f"Station PPP failed to converge: {input if isinstance(input, Path) else 'gLAB OUTPUT'} (total runtime: {total_time})")
 
-    st = Settings()
-    # Convert to MOCOREF_FRAME
-    x_itrf, y_itrf, z_itrf = x, y, z
-    x, y, z = change_rf("ITRF2020", st.MOCOREF_FRAME, x, y, z, epoch)
 
     # Mean position after convergence
     x_mean = np.nanmean(x[conv])
     y_mean = np.nanmean(y[conv])
     z_mean = np.nanmean(z[conv])
-    x_itrf = np.nanmean(x_itrf[conv])
-    y_itrf = np.nanmean(y_itrf[conv])
-    z_itrf = np.nanmean(z_itrf[conv])
 
     # Residuals
     x_res = x - x_mean
     y_res = y - y_mean
     z_res = z - z_mean
 
-    # Geodetic coordinates
+    # Geodetic Pos
+    st = Settings()
     if verbose or st.VERBOSE:
         print(f"PPP solution converged after {conv_time}, average taken over {total_time - conv_time}")
     
-    mean = np.asarray((x_mean, y_mean, z_mean))
-    mean_itrf = np.asarray((x_itrf, y_itrf, z_itrf))
+    pos = Pos(x_mean, y_mean, z_mean, epoch=np.nanmedian(epoch), frame="ITRF").reframe(st.MOCOREF_FRAME)
 
-    lon, lat, h = ecef_to_geo(*mean, rf=st.MOCOREF_FRAME)
     results = {
-        "position": mean,
+        "position": pos,
         "epochs": epoch,
         "epoch": np.nanmedian(epoch),
         "residuals": np.asarray([x_res, y_res, z_res]),
@@ -1499,11 +1492,6 @@ def read_glab_out(input: str|Path, verbose: bool = False) -> dict:
         "convergence_time": conv_time,
         "convergence_duration": total_time - conv_time,
         "total_duration": total_time,
-        "lon": lon,
-        "lat": lat,
-        "h": h,
-        "rotation": ecef_to_enu(lon, lat),
-        "itrf_position": mean_itrf,
     }
 
     return results
@@ -1611,7 +1599,7 @@ def generate_mocoref(
     Note: this applies to CSV files ONLY.
     
     Returns:
-    - pos: tuple with ECEF coordinates in ITRF2020
+    - pos: tuple with ECEF Pos in ITRF2020
     - mocoref_path: path to generated file or None"""
 
     # Check if data or data file was passed
@@ -1800,14 +1788,10 @@ def generate_mocoref(
             mocoref_longitude = float(value.search(lines[5]).group())
             mocoref_height = float(value.search(lines[6]).group())
     
-    # Convert to ECEF coordinates
-    st = Settings()
-    mocoref_pos = geo_to_ecef(mocoref_longitude, mocoref_latitude, mocoref_height + mocoref_antenna, rf=st.MOCOREF_FRAME)
-
-    # Resolve and unify frames
+    # Store position as Pos object
     if isinstance(timestamp, str):
         timestamp = parse_datetime_string(timestamp)
-    mocoref_pos = change_rf(st.MOCOREF_FRAME, output_frame, *mocoref_pos, epoch=timestamp)
+    mocoref_pos = Pos.geodetic(mocoref_longitude, mocoref_latitude, mocoref_height + mocoref_antenna, epoch=timestamp, rf=Settings().MOCOREF_FRAME)
 
     if generate or verbose:
         lines = []
@@ -1914,7 +1898,7 @@ def fetch_swepos(
         update_rinex_position(merged_obs, etrs89_pos)
         return merged_obs, merged_nav
 
-def rtkp(
+def ppk(
         rover_obs: str|Path,
         base_obs: str|Path,
         nav_file: str|Path,
@@ -1928,6 +1912,7 @@ def rtkp(
         atx_file: str|Path|None = None,
         receiver_file: str|Path|None = None,
         elevation_mask: float|None = None,
+        mocoref_pos: Pos|None = None,
         mocoref_file: str|Path = None,
         mocoref_type: str|None = None,
         mocoref_line: int = 1,
@@ -1940,7 +1925,7 @@ def rtkp(
         force_splice: bool = False,
         processing_frame: str = "ITRF"
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Performs RTKP processing on the ROVER OBS relative BASE OBS, and stores position in out_path if not pointing to a folder.
+    """Performs PPK processing on the ROVER OBS relative BASE OBS, and stores position in out_path if not pointing to a folder.
     If if sp3_file (SP3 file) is provided, runs in precise mode (CLK file must be provided if the SP3 file is a pure orbit file).
     If precise is True and no SP3 file is provided matching precise ephemeris data will be downloaded from ESA (number of
     parallel downloads specified by max_downloads and each file is attempted up to max_retries times).
@@ -1960,9 +1945,9 @@ def rtkp(
     The output directory is the folder containing the out_path, or the folder pointed to by the out_path.
     
     Returns:
-    - A Nx3 array with the coordinates (X, Y, Z)
-    - A Nx1 array with GPS time (seconds) for the coordinates
-    - A Nx1 array with the quality conversion (Q) for the coordinates"""
+    - A Nx3 array with the Pos (X, Y, Z)
+    - A Nx1 array with GPS time (seconds) for the Pos
+    - A Nx1 array with the quality conversion (Q) for the Pos"""
 
     rover_obs = Path(rover_obs)
     if not rover_obs.is_file():
@@ -2041,8 +2026,8 @@ def rtkp(
                 else:
                     warn("No callibration data available. Using all available constellations and frequencies.")
     
-    print(f"Running {'raw ' if raw else ''}RTKP post processing {'in precise mode ' if precise else 'with broadcast data '}...\n   Rover: {local(rover_obs)}\n   Base: {local(base_obs)}\n   Nav: {local(nav_file)}\n{f'   SP3: {local(sp3_file)}\n' if sp3_file else ''}{f'   CLK: {local(clk_file)}\n' if clk_file else ''}{f'   INX: {local(inx_file)}\n' if inx_file else ''}{f'-->Out: {local(out_path)}' if out_path else ''}", flush=True)
-    with resource(config_file, "RTKP_CONFIG", antenna=antenna_type, radome=radome, satellites=atx_file, receiver_file=receiver_file) as config:
+    print(f"Running {'raw ' if raw else ''}PPK {'in precise mode ' if precise else 'with broadcast data '}...\n   Rover: {local(rover_obs)}\n   Base: {local(base_obs)}\n   Nav: {local(nav_file)}\n{f'   SP3: {local(sp3_file)}\n' if sp3_file else ''}{f'   CLK: {local(clk_file)}\n' if clk_file else ''}{f'   INX: {local(inx_file)}\n' if inx_file else ''}{f'-->Out: {local(out_path)}' if out_path else ''}", flush=True)
+    with resource(config_file, "PPK_CONFIG", antenna=antenna_type, radome=radome, satellites=atx_file, receiver_file=receiver_file) as config:
         with tmp(output_dir / "tmp", allow_dir=True) as tmp_dir:
             if raw:
                 modify_config(config, raw=True)
@@ -2077,6 +2062,7 @@ def rtkp(
                     sp3_file=sp3_file,
                     clk_file=clk_file,
                     elevation_mask=elevation_mask,
+                    mocoref_pos=mocoref_pos,
                     mocoref_file=mocoref_file,
                     mocoref_type=mocoref_type,
                     mocoref_line=mocoref_line,
@@ -2099,6 +2085,7 @@ def rtkp(
                     sp3_file=sp3_file,
                     clk_file=clk_file,
                     elevation_mask=elevation_mask,
+                    mocoref_pos=mocoref_pos,
                     mocoref_file=mocoref_file,
                     mocoref_type=mocoref_type,
                     mocoref_line=mocoref_line,
@@ -2372,11 +2359,11 @@ def reachz2rnx(archive: Path|str, reference_date: datetime|None = None, output_d
             # Extract mocoref.moco file
             with tmp(output_dir / "llh.tmp") as llh_tmp:
                 extract_to(llh_file, llh_tmp, final_destination=llh_tmp.with_name("mocoref.moco"))
-                mocoref_data, mocoref_file = generate_mocoref(llh_tmp, timestamp=epoch, type="LLH", generate=True, tstart=start, tend=end)
+                mocoref_pos, mocoref_file = generate_mocoref(llh_tmp, timestamp=epoch, type="LLH", generate=True, tstart=start, tend=end)
             
             # Verify success and add to obs_data
             if mocoref_file.is_file():
-                obs_data[mocoref_file] = mocoref_data
+                obs_data[mocoref_file] = mocoref_pos
             else:
                 warn(f"No mocoref.moco file could be extracted from archive LLH log: {llh_file}")
         else:

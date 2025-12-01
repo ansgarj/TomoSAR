@@ -1,14 +1,349 @@
+from __future__ import annotations
 from pyproj import Transformer
 from datetime import datetime, timezone
 import numpy as np
 import numpy.typing as npt
+from typing import Iterator
 import rasterio
 from rasterio.vrt import WarpedVRT
 from rasterio.enums import Resampling
 
-from .utils import warn
 from .manager import resource
 from .config import Settings
+
+class Pos:
+    __slots__ = ("frame", "epoch", "_time", "_ecef", "_llh", "_map", "_enu")
+    frame: str                                  # Reference frame
+    epoch: float                                # Nominal epoch (decimal year)
+    _time: npt.NDArray[np.floating]             # Time coordinate [decimal year], shape (n,)
+    _ecef: npt.NDArray[np.floating]             # 3D ECEF coordinate array [X, Y, Z], shape (n, 3)
+    _llh: npt.NDArray[np.floating]              # 3D geodetic coordinate array [lon, lat, h], shape (n, 3)
+    _map: npt.NDArray[np.floating]              # 2D projected map coordinate array [Easting, Northing], shape (n, 2)
+    _enu: npt.NDArray[np.floating]              # Transformation matrices from ECEF to ENU coordinates, shape (n, 3, 3)
+
+    def __new__(self, frame: str|None = None) -> Pos:
+        self.frame = Settings().resolve_frame(frame)
+        self.epoch = None
+        self._time = None
+        self._ecef = None
+        self._llh = None
+        self._map = None
+        self._enu = None
+
+    # Standard init: ECEF coordinates
+    def __init__(self, *coordinates: float|np.ndarray|tuple[float|np.ndarray, ...], epoch: float|datetime|np.datetime64|npt.NDArray[np.datetime64|np.floating]|None = None, frame: str = None) -> Pos:
+        """Initiates coordinates in ECEF. The 4th dimension (time) is specified as a 4th coordinate (decimal year),
+        or via the epoch parameter. If a scalar epoch is provided for an array of coordinates, all coordinates are assumed to
+        belong to the same epoch (generally slightly less accurate).
+        
+        If the Reference Frame is not specified via the frame parameter, defaults to the TARGET_FRAME from Settings."""
+
+        # Get coordinates
+        if len(coordinates) == 1:
+            coordinates = coordinates[0]
+
+        # Return Coordinate object if one is passed
+        if isinstance(coordinates, coordinates):
+            self = coordinates.copy()
+            return
+
+        # Resolve and validate Reference Frame
+        self.frame = Settings().resolve_frame(frame)
+
+        # 3D coordinates      
+        if len(coordinates) == 3:
+            # Verify that epoch was specified
+            if not epoch:
+                raise ValueError("Specify a valid epoch, either as a 4th coordinate (decimal year) or via the epoch parameter.")
+            
+            # Store 3D coordinates
+            self._ecef = np.asarray(coordinates).reshape(-1, 3)
+
+            # Get time coordinate from epoch parameter
+            if isinstance(epoch, datetime):
+                # Normalize to UTC
+                if epoch.tzinfo is None:
+                    epoch = epoch.replace(tzinfo=timezone.utc)
+                else:
+                    epoch = epoch.astimezone(timezone.utc)
+
+                # Convert to decimal year
+                year = epoch.year
+                start_of_year = datetime(year, 1, 1, tzinfo=timezone.utc)
+                end_of_year = datetime(year + 1, 1, 1, tzinfo=timezone.utc)
+                year_length = (end_of_year - start_of_year).total_seconds()
+                seconds_into_year = (epoch - start_of_year).total_seconds()
+
+                self.epoch = year + seconds_into_year / year_length
+                self._time = np.full_like(self.X, self.epoch)
+            elif isinstance(epoch, np.datetime64):
+                year = epoch.astype('datetime64[Y]').astype(int) + 1970
+                start_of_year = np.datetime64(f'{year}-01-01')
+                end_of_year = np.datetime64(f'{year+1}-01-01')
+                year_length = end_of_year - start_of_year
+                duration_into_year = epoch - start_of_year
+
+                self.epoch = year + float(duration_into_year / year_length)
+                self._time = np.full_like(self.X, self.epoch)
+            # Time coordinate
+            else:
+                # datetime array
+                if isinstance(epoch[0], np.datetime64):
+                    # Convert to decimal year
+                    year = epoch.astype('datetime64[Y]').astype(int) + 1970
+                    start_of_year = np.array([np.datetime64(f'{y}-01-01') for y in year])
+                    end_of_year = np.array([np.datetime64(f'{y+1}-01-01') for y in year])
+                    year_length = end_of_year - start_of_year
+                    duration_into_year = epoch - start_of_year
+
+                    epoch = year + (duration_into_year / year_length).astype('float64')
+                
+                if len(epoch) != len(self):
+                    raise ValueError("Please specify a scalar epoch or an array-like object of the same length as the coordinates.")
+                
+                # Store time coordinate
+                self._time = epoch
+
+                # Extract nominal epoch
+                self.epoch = np.median(epoch)
+        elif len(coordinates) == 4:
+            # Store coordinates
+            self._ecef = np.asarray(coordinates[0:3])
+            self._time = np.asarray(coordinates[3])
+            
+            # Extract nominal epoch
+            self.epoch = np.median(self._time)
+        else:
+            raise ValueError(f"Expected 3 or 4 coordinates, received {len(coordinates)}: {coordinates}")
+
+    # Non-standard init: LLH coordinates
+    @classmethod
+    def geodetic(cls, *coordinates: float|np.ndarray|tuple[float|np.ndarray, ...], epoch: float|datetime|None = None, frame: str = None, lat_first: bool = False) -> Pos:
+        """Initiates coordinates in Geodetic (lon, lat, h). The 4th dimension (time) is specified as a 4th coordinate (decimal year),
+        or via the epoch parameter. If a scalar epoch is provided for an array of coordinates, all coordinates are assumed to
+        belong to the same epoch (generally slightly less accurate). If lat_first is set to True, takes the coordinates as
+        (lat, lon, h) instead.
+        
+        If the Reference Frame is not specified via the frame parameter, defaults to the TARGET_FRAME from Settings."""
+        # Initiate empty coordinates
+        self: Pos = cls.__new__(frame=frame)
+
+        # Get coordinates
+        if len(coordinates) == 1:
+            coordinates = coordinates[0]
+
+        # 3D coordinates      
+        if len(coordinates) == 3:
+            # Verify that epoch was specified
+            if not epoch:
+                raise ValueError("Specify a valid epoch, either as a 4th coordinate (decimal year) or via the epoch parameter.")
+            
+            # Store 3D coordinates
+            self._llh = np.asarray(coordinates).reshape(-1, 3)
+
+            # Get time coordinate from epoch parameter
+            if isinstance(epoch, datetime):
+                # Normalize to UTC
+                if epoch.tzinfo is None:
+                    epoch = epoch.replace(tzinfo=timezone.utc)
+                else:
+                    epoch = epoch.astimezone(timezone.utc)
+
+                # Convert to decimal year
+                year = epoch.year
+                start_of_year = datetime(year, 1, 1, tzinfo=timezone.utc)
+                end_of_year = datetime(year + 1, 1, 1, tzinfo=timezone.utc)
+                year_length = (end_of_year - start_of_year).total_seconds()
+                seconds_into_year = (epoch - start_of_year).total_seconds()
+
+                self.epoch = year + seconds_into_year / year_length
+                self._time = np.full_like(self.lon, self.epoch)
+            elif isinstance(epoch, np.datetime64):
+                year = epoch.astype('datetime64[Y]').astype(int) + 1970
+                start_of_year = np.datetime64(f'{year}-01-01')
+                end_of_year = np.datetime64(f'{year+1}-01-01')
+                year_length = end_of_year - start_of_year
+                duration_into_year = epoch - start_of_year
+
+                self.epoch = year + float(duration_into_year / year_length)
+                self._time = np.full_like(self.lon, self.epoch)
+            # Time coordinate
+            else:
+                # datetime array
+                if isinstance(epoch[0], np.datetime64):
+                    # Convert to decimal year
+                    year = epoch.astype('datetime64[Y]').astype(int) + 1970
+                    start_of_year = np.array([np.datetime64(f'{y}-01-01') for y in year])
+                    end_of_year = np.array([np.datetime64(f'{y+1}-01-01') for y in year])
+                    year_length = end_of_year - start_of_year
+                    duration_into_year = epoch - start_of_year
+
+                    epoch = year + (duration_into_year / year_length).astype('float64')
+                
+                if len(epoch) != len(self):
+                    raise ValueError("Please specify a scalar epoch or an array-like object of the same length as the coordinates.")
+                # Store time coordinate
+                self._time = epoch
+
+                # Extract nominal epoch
+                self.epoch = np.median(epoch)
+
+        elif len(coordinates) == 4:
+            # Store coordinates
+            self._llh = np.asarray(coordinates[0:3])
+            self._time = np.asarray(coordinates[3])
+            
+            # Extract nominal epoch
+            self.epoch = np.median(self._time)
+        else:
+            raise ValueError(f"Expected 3 or 4 coordinates, received {len(coordinates)}: {coordinates}")
+        if lat_first:
+            self._llh = np.asarray([self._llh[1], self._llh[0], self._llh[2]])
+    
+    @property
+    def coords(self) -> npt.NDArray[np.floating]:
+        """ECEF coordinates"""
+        if not self._ecef:
+            if not self._llh:
+                raise ValueError("coordinates defined in neither ECEF nor Geodetic system")
+            self._ecef = geo_to_ecef(self._llh, rf=self.frame)
+        return self._ecef
+    
+    @property
+    def geo(self) -> npt.NDArray[np.floating]:
+        """Geodetic coordinates"""
+        if not self._llh:
+            if not self._ecef:
+                raise ValueError("coordinates defined in neither ECEF nor Geodetic system")
+            self._llh = ecef_to_geo(self._ecef, rf=self.frame)
+        return self._llh
+    
+    @property
+    def map(self) -> npt.NDArray[np.floating]:
+        """Projected map coordinates"""
+        if not self._map:
+            self._map = geo_to_map(lat=self.lat, lon=self.lon, rf=self.frame)
+        return self._map
+    
+    @property
+    def X(self) -> npt.NDArray[np.floating]:
+        """ECEF X"""
+        return self.coords[0]
+    
+    @property
+    def Y(self) -> npt.NDArray[np.floating]:
+        """ECEF Y"""
+        return self.coords[1]
+    
+    @property
+    def Z(self) -> npt.NDArray[np.floating]:
+        """ECEF Z"""
+        return self.coords[2]
+    
+    @property
+    def lon(self) -> npt.NDArray[np.floating]:
+        """Longitude"""
+        return self.geo[0]
+    
+    @property
+    def lat(self) -> npt.NDArray[np.floating]:
+        """Latitude"""
+        return self.geo[1]
+    
+    @property
+    def h(self) -> npt.NDArray[np.floating]:
+        """Ellipsoidal height"""
+        return self.geo[2]
+    
+    @property
+    def easting(self) -> npt.NDArray[np.floating]:
+        """Projected easting"""
+        return self.map[0]
+    
+    @property
+    def northing(self) -> npt.NDArray[np.floating]:
+        """Projected northing"""
+        return self.map[1]
+    
+    @property
+    def t(self) -> npt.NDArray[np.floating]:
+        """Time coordinate"""
+        return self._time
+    
+    def __len__(self) -> int:
+        """Number of points"""
+        if self._ecef:
+            return len(self.X)
+        elif self._llh:
+            return len(self.lon)
+        else:
+            raise ValueError("coordinates defined in neither ECEF nor Geodetic system")
+        
+    def __copy__(self) -> Pos:
+        if self._ecef:
+            return Pos(self.coords.copy(), epoch=self.t.copy(), frame=self.frame)
+        if self._llh:
+            return Pos().geodetic(self.geo.copy(), epoch=self.t.copy(), frame=self.frame)
+        raise ValueError("coordinates defined in neither ECEF nor Geodetic system")
+    
+    def __iter__(self) -> Iterator[npt.NDArray[np.floating]]:
+        """Iterates over ECEF coordinates"""
+        return iter(self.coords)
+    
+    def __eq__(self, other: object) -> bool:
+        """Returns True if other is a coordinates object with matching coordinates or if it contains
+        matching ECEF coordinates in an array iterable object, otherwise returns false"""
+        other = Pos(other, epoch=self.t, frame=self.frame)
+        if other.frame != self.frame:
+            return False
+        if self._ecef and other._ecef:
+            return self.coords == other.coords
+        elif self._llh and other._llh:
+            return self.geo == other.geo
+        return self.coords == other.coords
+    
+    def __add__(self, other: object) -> npt.NDArray[np.floating]:
+        if isinstance(other, Pos):
+            other.reframe(self.frame)
+            return self.coords + other.coords
+        return NotImplemented
+    
+    def __sub__(self, other: object) -> npt.NDArray[np.floating]:
+        if isinstance(other, Pos):
+            other.reframe(self.frame)
+            return self.coords - other.coords
+        return NotImplemented
+    
+    def reframe(self, frame: str) -> Pos:
+        """Changes the Reference Frame of the coordinates to the one specified"""
+        if frame == self.frame:
+            return
+        self._ecef = np.asarray(change_rf(self.frame, frame, *self.coords, self.t))
+        # Clear other coordinate systems 
+        self._llh = None
+        self._map = None
+        return self
+
+    def to_enu(self, *coordinates: Pos|float|np.ndarray|tuple[float|np.ndarray, ...]) -> npt.NDArray[np.floating]:
+        """Returns the input ECEF coordinates in the local ENU coordinates of this object.
+        
+        Returns array of shape (n, 3)"""
+        if not self._enu:
+            self._enu = ecef_to_enu(self.lon, self.lat)
+        # Unify input
+        coords = coordinates(*coordinates, epoch=self.t, frame=self.frame)
+        if coords.frame != self.frame:
+            coords.reframe(self.frame)
+        return (self._enu @ (self - coords)[..., None]).squeeze()
+    
+    def to_ecef(self, *coordinates: Pos|float|np.ndarray|tuple[float|np.ndarray, ...]) -> npt.NDArray[np.floating]:
+        """Returns the input ENU coordinates, assumed to be in the local frame of this object,
+        in the ECEF coordinates of the matching frame.
+        
+        Returns array of shape (n, 3)"""
+        if not self._enu:
+            self._enu = ecef_to_enu(self.lon, self.lat)
+        return ((self._enu.T if len(self) == 1 else np.transpose(self._enu, axes=(0,2,1))) @ coordinates[..., None]).squeeze()
 
 # Realizations
 def _itrf20_to_etrf14(*coordinates: float|np.ndarray|tuple[float|np.ndarray, ...], epoch: float|datetime|None = None) -> tuple[float|np.ndarray, ...]:
@@ -55,7 +390,7 @@ def _itrf20_to_etrf14(*coordinates: float|np.ndarray|tuple[float|np.ndarray, ...
         "+rx=0.00221 +ry=0.013806 +rz=-0.02002 +s=-0.00042 "
         "+dx=0 +dy=-0.0001 +dz=0.0002 "
         "+drx=8.5e-05 +dry=0.000531 +drz=-0.00077 +ds=0 "
-        f"+t_epoch=2015 +convention=position_vector"
+        f"+t_epoch=2015 +convention=coordinatesition_vector"
     )
 
     return Transformer.from_pipeline(proj_str).transform(*coordinates)
@@ -96,7 +431,7 @@ def _etrf14_to_itrf20(*coordinates: float|np.ndarray|tuple[float|np.ndarray, ...
         "+rx=0.00221 +ry=0.013806 +rz=-0.02002 +s=-0.00042 "
         "+dx=0 +dy=-0.0001 +dz=0.0002 "
         "+drx=8.5e-05 +dry=0.000531 +drz=-0.00077 +ds=0 "
-        f"+t_epoch=2015 +convention=position_vector"
+        f"+t_epoch=2015 +convention=coordinatesition_vector"
     )
 
     return Transformer.from_pipeline(proj_str).transform(*coordinates)
@@ -113,7 +448,7 @@ def _etrf14_to_etrf97(*coordinates: float|np.ndarray|tuple[float|np.ndarray, ...
         "+proj=helmert "
         "+x=0.03054 +y=0.04606 +z=-0.07944 "
         "+rx=0.00141958 +ry=0.00015132 +rz=0.00150337 "
-        "+s=0.003002 +convention=position_vector"
+        "+s=0.003002 +convention=coordinatesition_vector"
     )
 
     return Transformer.from_pipeline(proj_str).transform(*coordinates)
@@ -130,7 +465,7 @@ def _etrf97_to_etrf14(*coordinates: float|np.ndarray|tuple[float|np.ndarray, ...
         "+inv +proj=helmert "
         "+x=0.03054 +y=0.04606 +z=-0.07944 "
         "+rx=0.00141958 +ry=0.00015132 +rz=0.00150337 "
-        "+s=0.003002 +convention=position_vector"
+        "+s=0.003002 +convention=coordinatesition_vector"
     )
 
     return Transformer.from_pipeline(proj_str).transform(*coordinates)
@@ -153,7 +488,7 @@ def _etrf14_to_etrf96(*coordinates: float|np.ndarray|tuple[float|np.ndarray, ...
             "+proj=helmert "
             "+x=0.15651 +y=-0.10993 +z=-0.10935 "
             "+rx=-0.00312861 +ry=-0.00378935 +rz=0.00403512 "
-            "+s=0.005290 +convention=position_vector"
+            "+s=0.005290 +convention=coordinatesition_vector"
         )
     else:
         # Helmert parameters for Estonia
@@ -161,7 +496,7 @@ def _etrf14_to_etrf96(*coordinates: float|np.ndarray|tuple[float|np.ndarray, ...
             "+proj=helmert "
             "+x=-0.05027 +y=-0.11595 +z=0.03012 "
             "+rx=-0.00310814  +ry=0.00457237 +rz=0.00472406 "
-            "+s=0.003191 +convention=position_vector"
+            "+s=0.003191 +convention=coordinatesition_vector"
         )
 
     return Transformer.from_pipeline(proj_str).transform(*coordinates)
@@ -184,7 +519,7 @@ def _etrf96_to_etrf14(*coordinates: float|np.ndarray|tuple[float|np.ndarray, ...
             "+inv +proj=helmert "
             "+x=0.15651 +y=-0.10993 +z=-0.10935 "
             "+rx=-0.00312861 +ry=-0.00378935 +rz=0.00403512 "
-            "+s=0.005290 +convention=position_vector"
+            "+s=0.005290 +convention=coordinatesition_vector"
         )
     else:
         # Helmert parameters for Estonia
@@ -192,7 +527,7 @@ def _etrf96_to_etrf14(*coordinates: float|np.ndarray|tuple[float|np.ndarray, ...
             "+inv +proj=helmert "
             "+x=-0.05027 +y=-0.11595 +z=0.03012 "
             "+rx=-0.00310814  +ry=0.00457237 +rz=0.00472406 "
-            "+s=0.003191 +convention=position_vector"
+            "+s=0.003191 +convention=coordinatesition_vector"
         )
 
     return Transformer.from_pipeline(proj_str).transform(*coordinates)
@@ -209,7 +544,7 @@ def _etrf14_to_etrf92(*coordinates: float|np.ndarray|tuple[float|np.ndarray, ...
         "+proj=helmert "
         "+x=0.66818 +y=0.04453 +z=-0.45049 "
         "+rx=0.00312883 +ry=-0.02373423 +rz=0.00442969 "
-        "+s=-0.003136 +convention=position_vector"
+        "+s=-0.003136 +convention=coordinatesition_vector"
     )
 
     return Transformer.from_pipeline(proj_str).transform(*coordinates)
@@ -226,7 +561,7 @@ def _etrf92_to_etrf14(*coordinates: float|np.ndarray|tuple[float|np.ndarray, ...
         "+inv +proj=helmert "
         "+x=0.66818 +y=0.04453 +z=-0.45049 "
         "+rx=0.00312883 +ry=-0.02373423 +rz=0.00442969 "
-        "+s=-0.003136 +convention=position_vector"
+        "+s=-0.003136 +convention=coordinatesition_vector"
     )
 
     return Transformer.from_pipeline(proj_str).transform(*coordinates)
@@ -243,7 +578,7 @@ def _etrf14_to_etrf00(*coordinates: float|np.ndarray|tuple[float|np.ndarray, ...
         "+proj=helmert "
         "+x=0.36749 +y=0.14351 +z=-0.18472 "
         "+rx=0.00479140  +ry=-0.01027566  +rz=0.0276102 "
-        "+s=-0.003684 +convention=position_vector"
+        "+s=-0.003684 +convention=coordinatesition_vector"
     )
 
     return Transformer.from_pipeline(proj_str).transform(*coordinates)
@@ -260,7 +595,7 @@ def _etrf00_to_etrf14(*coordinates: float|np.ndarray|tuple[float|np.ndarray, ...
         "+inv +proj=helmert "
         "+x=0.36749 +y=0.14351 +z=-0.18472 "
         "+rx=0.00479140  +ry=-0.01027566  +rz=0.0276102 "
-        "+s=-0.003684 +convention=position_vector"
+        "+s=-0.003684 +convention=coordinatesition_vector"
     )
 
     return Transformer.from_pipeline(proj_str).transform(*coordinates)
@@ -277,7 +612,7 @@ def _etrf14_to_etrf89(*coordinates: float|np.ndarray|tuple[float|np.ndarray, ...
         "+proj=helmert "
         "+x=0.09745 +y=-0.69388 +z=0.52901 "
         "+rx=-0.01920690  +ry=0.01043272  +rz=0.02327169 "
-        "+s=-0.049663 +convention=position_vector"
+        "+s=-0.049663 +convention=coordinatesition_vector"
     )
 
     return Transformer.from_pipeline(proj_str).transform(*coordinates)
@@ -294,7 +629,7 @@ def _etrf89_to_etrf14(*coordinates: float|np.ndarray|tuple[float|np.ndarray, ...
         "+inv +proj=helmert "
         "+x=0.09745 +y=-0.69388 +z=0.52901 "
         "+rx=-0.01920690  +ry=0.01043272  +rz=0.02327169 "
-        "+s=-0.049663 +convention=position_vector"
+        "+s=-0.049663 +convention=coordinatesition_vector"
     )
 
     return Transformer.from_pipeline(proj_str).transform(*coordinates)
@@ -577,7 +912,7 @@ def _itrf20_to_etrf20(*coordinates: float|np.ndarray|tuple[float|np.ndarray, ...
         "+rx=0.002236 +ry=0.013494 +rz=-0.019578 +s=0 "
         "+dx=0 +dy=0 +dz=0 "
         "+drx=8.6e-05 +dry=0.000519 +drz=-0.000753 +ds=0 "
-        "+t_epoch=2015 +convention=position_vector"
+        "+t_epoch=2015 +convention=coordinatesition_vector"
     )
 
     return Transformer.from_pipeline(proj_str).transform(*coordinates)[0:3]
@@ -619,7 +954,7 @@ def _etrf20_to_itrf20(*coordinates: float|np.ndarray|tuple[float|np.ndarray, ...
         "+rx=0.002236 +ry=0.013494 +rz=-0.019578 +s=0 "
         "+dx=0 +dy=0 +dz=0 "
         "+drx=8.6e-05 +dry=0.000519 +drz=-0.000753 +ds=0 "
-        "+t_epoch=2015 +convention=position_vector"
+        "+t_epoch=2015 +convention=coordinatesition_vector"
     )
 
     return Transformer.from_pipeline(proj_str).transform(*coordinates)
@@ -1245,7 +1580,7 @@ def change_rf(source_rf: str, target_rf: str, *coordinates: float|np.ndarray|tup
 
     return transformer_map[source_rf][target_rf](*coordinates, epoch=epoch)[0:3]
 
-# Coordinates
+# coordinates
 def ecef_to_geo(*coordinates: float|np.ndarray|tuple[float|np.ndarray, ...], rf: str = None) -> tuple[float|np.ndarray, ...]:
     """Transforms ECEF coordinates to geodetic. The reference frame can be specified with the rf parameter.
     If not specified it will default to the REFERENCE_FRAME: TARGET in the Settings."""

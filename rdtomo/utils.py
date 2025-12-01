@@ -783,14 +783,14 @@ LEAP_SECONDS = np.array([
     np.datetime64('2012-07-01'), np.datetime64('2015-07-01'), np.datetime64('2017-01-01')
 ])
 
-def _to_np_datetime64(obj: object) -> np.ndarray:
+def _to_np_datetime64(obj: object) -> npt.NDArray[np.datetime64]:
     """Convert input to np.datetime64 array."""
     if isinstance(obj, (datetime, date)):
         return np.array([np.datetime64(obj)])
     elif isinstance(obj, np.datetime64):
         return np.array([obj])
     elif isinstance(obj, (list, tuple, np.ndarray)):
-        return np.asarray(obj, dtype='datetime64[ns]')
+        return np.asarray(obj, dtype='datetime64[ms]')
     else:
        raise TypeError(f"Unsupported type: {type(obj)}")
 

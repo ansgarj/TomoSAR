@@ -24,7 +24,7 @@ from ..data import LoadDir, DataDir, ProcessingDir
 @click.option("--hcn", "is_hcn", is_flag=True, help="Force base OBS to be extracted from a .HCN file")
 @click.option("--rtcm3", "is_rtcm3", is_flag=True, help="Force base OBS to be extracted from a .RTCM3 file")
 @click.option("-h", "--header", "use_header", is_flag=True, help="Read mocoref data from RINEX header (no separate file, use ONLY if RINEX header is known to contain precise position)")
-@click.option("--broadcast", "use_broadcast", is_flag=True, help="Use broadcast ephemeris data (NOTE: this may improve Q1 percentage, but risks reducing integrity, run tomosar test precise-rktp to test)")
+@click.option("--broadcast", "use_broadcast", is_flag=True, help="Use broadcast ephemeris data (NOTE: this may improve Q1 percentage, but risks reducing integrity, run tomosar test precise-ppk to test)")
 @click.option("-a", "--atx", type=click.Path(exists=True, path_type=Path), default=None, help="Path to the satellite antenna .atx file")
 @click.option("-r", "--receiver", type=click.Path(exists=True, path_type=Path), default=None, help="Path to the .atx file containing receiver antenna info")
 @click.option("--downloads", type=int, default=10, help="Max number of parallel downloads (default: 10)")
@@ -70,7 +70,7 @@ def init(
     (3) Drone Radar .bin, .log and .cfg;
     (4) GNSS base station;
     (5) Mocoref data or precise position of GNSS base station; and
-    (6) Data files for PPP and precise mode RTKP post processing.
+    (6) Data files for PPP and precise mode PPK processing.
     
     If the GNSS base station file is missing, tomosar init can fetch files from the nearest Swepos station,
     or supplement Mocoref data by performing static PPP on the base station.
@@ -84,7 +84,7 @@ def init(
     
     The files are converted where applicable and copied/moved into a processing directory, in such a way that the content
     of the data directory where tomosar init was initiated is left unaltered. Then preprocessing is initiated [ONLY GNSS IMPLEMENTED].
-    By default tomosar init will use precise ephemeris data for the RTKP post processing, and will download this data if not
+    By default tomosar init will use precise ephemeris data for the PPK processing, and will download this data if not
     available (disable by running with --broadcast)
     
     Note that tomosar init can also be run inside a processing directory, in which case it simply initiates preprocessing [ONLY GNSS IMPLEMENTED].
@@ -125,7 +125,7 @@ def init(
                 elevation_mask = elevation_mask,
                 minimal_overlap = minimal_overlap,
                 dry=dry,
-                rtkp_config=config,
+                ppk_config=config,
             )
     # Verify that loading as Processing Directory was sucessful (failes on dry)
     if not isinstance(path, ProcessingDir):
@@ -146,7 +146,7 @@ def init(
 @click.command()
 @click.argument("archive", type=click.Path(exists=True, dir_okay=False, path_type=Path))
 @click.option("-o", "--output", "output_dir", type=click.Path(exists=False, file_okay=False, path_type=Path), default=None, help="Extract files into given folder (default: parent of archive)")
-@click.option("--rover", "rover_obs", type=click.Path(exists=True, dir_okay=False, path_type=Path), default=None, help="Target rover OBS for RTKP processing")
+@click.option("--rover", "rover_obs", type=click.Path(exists=True, dir_okay=False, path_type=Path), default=None, help="Target rover OBS for PPK processing")
 @click.option("-n", "--nav", "extract_nav", is_flag=True, help="Extract NAV file")
 @click.option("--verbose", is_flag=True, help="Verbose mode.")
 def extract_reach(archive: Path, output_dir: Path|None, rover_obs: Path|None, extract_nav: bool, verbose: bool) -> None:

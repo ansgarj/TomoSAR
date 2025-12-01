@@ -14,10 +14,10 @@ from os import cpu_count
 from .config import Settings
 from .utils import warn, extract_datetime, drop_into_terminal, local
 from .manager import tmp, read_only, DirExistsError, DirNotFoundError
-from .gnss import reachz2rnx, fetch_swepos, extract_rnx_info, station_ppp, rtkp, ubx2rnx, splice_sp3, splice_clk, splice_inx, chc2rnx, reach2rnx, generate_mocoref
-from .transformers import ecef_to_geo
+from .gnss import reachz2rnx, fetch_swepos, extract_rnx_info, station_ppp, ppk, ubx2rnx, splice_sp3, splice_clk, splice_inx, chc2rnx, reach2rnx, generate_mocoref
 from .core import TomoScene, TomoScenes, Scenes, tomoinfo
 from .apperture import SARModel
+from .position import Pos
 
 #
 # Abstract class that dispatches to DataDir, ProcessingDir, TomoDir or TomoArchive
@@ -78,7 +78,7 @@ class LoadDir(Path):
 class DroneData():
     container: Path|None = None
     timestamp: datetime|None = None
-    base_pos: np.ndarray|None = None
+    base_pos: Pos|None = None
     base_start: datetime|None = None
     base_end: datetime|None = None
     drone_start: datetime|None = None
@@ -653,18 +653,17 @@ class DataDir(LoadDir):
                         retain=True,
                         make_mocoref=True
                     )
-                    data.base_pos = results['itrf_position']
+                    data.base_pos = results['position']
                     data.sp3 = results['sp3'] 
                     data.clk = results['clk']
                     data.inx = results['inx']
                     data.mocoref = results['mocoref_file']
 
             if use_header:
-                lon, lat, h = ecef_to_geo(*header_pos, rf=settings.MOCOREF_FRAME) 
                 mocoref_dict = {
-                    settings.MOCOREF_LATITUDE: lat,
-                    settings.MOCOREF_LONGITUDE: lon,
-                    settings.MOCOREF_HEIGHT: h,
+                    settings.MOCOREF_LATITUDE: header_pos.lat,
+                    settings.MOCOREF_LONGITUDE: header_pos.lon,
+                    settings.MOCOREF_HEIGHT: header_pos.h,
                     settings.MOCOREF_ANTENNA: 0.
                 }
                 data.base_pos, data.mocoref = generate_mocoref(mocoref_dict, timestamp=data.base_epoch(), generate=True, output_dir=data.container)
@@ -870,7 +869,7 @@ class ProcessingDir(LoadDir):
         print("Running init")
         self.open(atx=atx, receiver=receiver, minimal_overlap=minimal_overlap)
         
-        results = rtkp(
+        results = ppk(
             rover_obs=self.data.drone_rnx_obs,
             base_obs=self.data.base_obs,
             nav_file=self.data.drone_rnx_nav,
@@ -891,16 +890,18 @@ class ProcessingDir(LoadDir):
             max_retries=download_attempts
         )
         coords, gpst, q = results["coordinates"], results["gpst"], results["quality"]
+        coords: Pos
+
         fig, axs = plt.subplots(2, 1, squeeze=False, figsize=(8, 8))
         axs = axs.flatten()
         ax = axs[0]
-        ax.plot(gpst[q==1], coords[2,q==1], 'g')
-        ax.plot(gpst[q!=1], coords[2,q!=1], 'r+')
+        ax.plot(gpst[q==1], coords.h[q==1], 'g')
+        ax.plot(gpst[q!=1], coords.h[q!=1], 'r+')
         ax.set_xlabel("GPST (s)")
         ax.set_ylabel("Ellipsoidal Height (m)")
         ax = axs[1]
-        ax.plot(*coords[:,q==1], 'g')
-        ax.plot(*coords[:,q!=1], 'r+')
+        ax.plot(coords.easting[q==1], coords.northing[q==1], 'g')
+        ax.plot(coords.easting[q!=1], coords.northing[q!=1], 'r+')
         ax.set_xlabel("Easting (m)")
         ax.set_ylabel("Northing (m)")
         fig_name = self.data.timestamp.strftime("%Y-%m-%d-%H-%M-%S-position.svg")

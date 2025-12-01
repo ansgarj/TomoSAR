@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unrealeased]
+
+### Added
+- `rdtomo.position.Pos` class that functions as a simplified interface to manage coordinates and Reference Frames
+
+### Changed
+- Renamed `rdtomo.transformers` to `rdtomo.position`
+- `rdtomo` functions should now use the `rdtomo.position.Pos` class (**exception**: `rdtomo.trackfinding` which requires a more thorough walkthrough)
+- Changed the name of `rdtomo.gnss.rtkp` to `rdtomo.gnss.ppk` to better match reality
+
 ## [0.1.0] - 2025-11-28
 
 ### Note

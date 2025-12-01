@@ -5,10 +5,10 @@ from pathlib import Path
 import numpy as np
 from matplotlib import pyplot as plt
 
-from ..gnss import fetch_swepos, station_ppp as run_ppp, rtkp as run_rtkp, ubx2rnx
+from ..gnss import fetch_swepos, station_ppp as run_ppp, ppk as run_ppk, ubx2rnx
 from ..manager import resource
-from ..transformers import geo_to_ecef, ecef_to_enu
-from ..config import LOCAL, Settings
+from ..position import Pos
+from ..config import LOCAL
 from ..data import DataDir
 
 @click.group()
@@ -59,9 +59,9 @@ def gnss(savar) -> None:
         else:
             raise RuntimeError("Station PPP processing produced poor solution")
 
-        # Run RTKP
+        # Run PPK
         out_path = rover_obs.with_suffix(".pos")
-        _, gpst, q = run_rtkp(
+        _, gpst, q = run_ppk(
             rover_obs=rover_obs,
             base_obs=swepos_obs,
             nav_file=rover_nav,
@@ -79,11 +79,11 @@ def gnss(savar) -> None:
             raise RuntimeError("rnx2rtkp failed to produce a .pos file with content")
 
         if quality_conversion > 99 and dur == timedelta(minutes=10, seconds=1.6):
-            print("TEST: RTKP processing sucessful")
+            print("TEST: PPK processing sucessful")
             print()
             print("GNSS processing OPERATIONAL!")
         else:
-            raise RuntimeError("rnx2rtkp produced poor Q1 quality or lost time, check tomosar settings RTKP_CONFIG")
+            raise RuntimeError("rnx2rtkp produced poor Q1 quality or lost time, check tomosar settings PPK_CONFIG")
         
 @test.command()
 @click.argument("path", type=click.Path(exists=True, file_okay=False, path_type=DataDir), default=DataDir.cwd())
@@ -164,7 +164,9 @@ def station_ppp(
             header=False,
             make_mocoref=False
         )
-        diff = results["rotation"] @ (data.base_pos - results["itrf_position"])    
+        pos = results["position"]
+        pos: Pos
+        diff = pos.to_enu(data.base_pos)    
 
     distance = np.sqrt((diff**2).sum())
     print(f"Distance: {distance:.2f} m (E: {diff[0]:.2f} m, N: {diff[1]:.2f} m, U: {diff[2]:.2f} m)")
@@ -191,7 +193,7 @@ def station_ppp(
 @click.option("--offset", type=float, default=-0.079, help="Specify vertical PCO between mocoref data log receiver and drone processing receiver (default=-0.079) for CSV files")
 @click.option("--overlap", "minimal_overlap", type=float, default=10, help="Specify minimal overlap between base OBS and drone flight in minutes (default: 10 minutes)")
 @click.option("-k", "--config", type=click.Path(exists=True, path_type=Path), default=None, help="Specify external config file for rnx2rtkp")
-def precise_rtkp(
+def precise_ppk(
     path: DataDir,
     use_swepos: bool,
     use_ppp: bool,
@@ -214,7 +216,7 @@ def precise_rtkp(
     minimal_overlap: float,
     config: Path,
 ) -> None:
-    """Compare solutions from precise and broadcast ephemeris data in RTKP post processing. This test opens a Data Directory and runs RTKP
+    """Compare solutions from precise and broadcast ephemeris data in PPK post processing. This test opens a Data Directory and runs PPK
     post processing on the drone once with precise mode and once with broadcast ephemeris data."""
 
     with path.open(
@@ -241,7 +243,7 @@ def precise_rtkp(
     ) as data:
         if use_swepos and not elevation_mask:
             elevation_mask = 20 # Precise 
-        results_prec = run_rtkp(
+        results_prec = run_ppk(
             rover_obs=data.drone_rnx_obs,
             base_obs=data.base_obs,
             nav_file=data.drone_rnx_nav,
@@ -262,7 +264,7 @@ def precise_rtkp(
         print()
         if use_swepos and not elevation_mask:
             elevation_mask = 5 # Broadcast
-        results_bc = run_rtkp(
+        results_bc = run_ppk(
             rover_obs=data.drone_rnx_obs,
             base_obs=data.base_obs,
             nav_file=data.drone_rnx_nav,
@@ -282,6 +284,10 @@ def precise_rtkp(
 
     coords_prec, gpst, q_prec = results_prec["coordinates"], results_prec["gpst"], results_prec["quality"]
     coords_bc, q_bc = results_bc["coordinates"], results_bc["quality"]
+
+    coords_prec: Pos
+    coords_bc: Pos
+
     # Index tracking
     precise_only = (q_prec != 1) & (q_bc == 1)
     bc_only = (q_bc != 1) & (q_prec == 1)
@@ -291,18 +297,18 @@ def precise_rtkp(
     axs = axs.flatten()
     ax = axs[0]
     #ax.plot(gpst, coords_precise[:,2], 'g-', label=f"Precise")
-    ax.plot(gpst, coords_prec[2,:], 'g-', label=f"Precise track")
-    ax.plot(gpst, coords_bc[2,:], 'b:', label=f"Broadcast track")
-    ax.plot(gpst[precise_only], coords_prec[2, precise_only], 'r+', label=f"Precise only float")
-    ax.plot(gpst[bc_only], coords_bc[2, bc_only], 'm+', label=f"Broadcast only float")
-    ax.plot(gpst[both], coords_prec[2, both], 'y+', label="Both float (precise)")
-    ax.plot(gpst[both], coords_bc[2, both], 'c+', label="Both float (broadcast)")
+    ax.plot(gpst, coords_prec.h, 'g-', label=f"Precise track")
+    ax.plot(gpst, coords_bc.h, 'b:', label=f"Broadcast track")
+    ax.plot(gpst[precise_only], coords_prec.h[precise_only], 'r+', label=f"Precise only float")
+    ax.plot(gpst[bc_only], coords_bc.h[bc_only], 'm+', label=f"Broadcast only float")
+    ax.plot(gpst[both], coords_prec.h[both], 'y+', label="Both float (precise)")
+    ax.plot(gpst[both], coords_bc.h[both], 'c+', label="Both float (broadcast)")
     ax.set_ylabel("Ellipsoidal Height (m)")
     ax.legend()
 
     ax = axs[1]
     diff = coords_bc - coords_prec
-    dist = np.sqrt((diff**2).sum(axis=0))
+    dist = np.sqrt((diff**2).sum(axis=1)).squeeze()
     ax.plot(gpst, dist, label="Distance (m)")
     ax.set_ylabel("Coordinate difference (m)")
 
@@ -329,7 +335,7 @@ def precise_rtkp(
 @click.option("--hcn", "is_hcn", is_flag=True, help="Force base OBS to be extracted from a .HCN file")
 @click.option("--rtcm3", "is_rtcm3", is_flag=True, help="Force base OBS to be extracted from a .RTCM3 file")
 @click.option("-h", "--header", "use_header", is_flag=True, help="Read mocoref data from RINEX header (no separate file, use ONLY if RINEX header is known to contain precise position)")
-@click.option("--broadcast", "use_broadcast", is_flag=True, help="Use broadcast ephemeris data (NOTE: this may improve Q1 percentage, but risks reducing integrity, run tomosar test precise-rktp to test)")
+@click.option("--broadcast", "use_broadcast", is_flag=True, help="Use broadcast ephemeris data")
 @click.option("-a", "--atx", type=click.Path(exists=True, path_type=Path), default=None, help="Path to the satellite antenna .atx file")
 @click.option("-r", "--receiver", type=click.Path(exists=True, path_type=Path), default=None, help="Path to the .atx file containing receiver antenna info")
 @click.option("--downloads", type=int, default=10, help="Max number of parallel downloads (default: 10)")
@@ -339,7 +345,7 @@ def precise_rtkp(
 @click.option("--offset", type=float, default=-0.079, help="Specify vertical PCO between mocoref data log receiver and drone processing receiver (default=-0.079) for CSV files")
 @click.option("--overlap", "minimal_overlap", type=float, default=10, help="Specify minimal overlap between base OBS and drone flight in minutes (default: 10 minutes)")
 @click.option("-k", "--config", type=click.Path(exists=True, path_type=Path), default=None, help="Specify external config file for rnx2rtkp")
-def rtkp(
+def ppk(
     path: DataDir,
     use_swepos: bool,
     use_ppp: bool,
@@ -363,7 +369,7 @@ def rtkp(
     minimal_overlap: float,
     config: Path,
 ) -> None:
-    """Compare solutions from internal and raw RTKP post processing. This test opens a Data Directory and runs RTKP post processing
+    """Compare solutions from internal and raw PPK processing. This test opens a Data Directory and runs PPK processing
     on the drone once with the internal resources, and once raw (including no files downloaded)."""
 
     with path.open(
@@ -393,7 +399,7 @@ def rtkp(
                 elevation_mask = 20 # Precise 
             else:
                 elevation_mask = 5
-        results_int = run_rtkp(
+        results_int = run_ppk(
             rover_obs=data.drone_rnx_obs,
             base_obs=data.base_obs,
             nav_file=data.drone_rnx_nav,
@@ -411,7 +417,7 @@ def rtkp(
             retain=False
         )
         print()
-        results_raw = run_rtkp(
+        results_raw = run_ppk(
             rover_obs=data.drone_rnx_obs,
             base_obs=data.base_obs,
             nav_file=data.drone_rnx_nav,
@@ -430,6 +436,9 @@ def rtkp(
     coords_int, gpst, q_int = results_int["coordinates"], results_int["gpst"], results_int["quality"]
     coords_raw, q_raw = results_raw["coordinates"], results_raw["quality"]
 
+    coords_int: Pos
+    coords_raw: Pos
+
     # Index tracking
     int_only = (q_int != 1) & (q_raw == 1)
     raw_only = (q_raw != 1) & (q_int == 1)
@@ -439,18 +448,18 @@ def rtkp(
     axs = axs.flatten()
     ax = axs[0]
     #ax.plot(gpst, coords_precise[:,2], 'g-', label=f"Precise")
-    ax.plot(gpst, coords_int[2,:], 'g-', label="Internal track")
-    ax.plot(gpst, coords_raw[2,:], 'b:', label="Raw track")
-    ax.plot(gpst[int_only], coords_int[2, int_only], 'r+', label=f"Internal only float")
-    ax.plot(gpst[raw_only], coords_raw[2, raw_only], 'm+', label=f"Raw only float")
-    ax.plot(gpst[both], coords_int[2, both], 'y+', label=f"Both float (internal)")
-    ax.plot(gpst[both], coords_raw[2, both], 'c+', label=f"Both float (raw)")
+    ax.plot(gpst, coords_int.h, 'g-', label="Internal track")
+    ax.plot(gpst, coords_raw.h, 'b:', label="Raw track")
+    ax.plot(gpst[int_only], coords_int.h[int_only], 'r+', label=f"Internal only float")
+    ax.plot(gpst[raw_only], coords_raw.h[raw_only], 'm+', label=f"Raw only float")
+    ax.plot(gpst[both], coords_int.h[both], 'y+', label=f"Both float (internal)")
+    ax.plot(gpst[both], coords_raw.h[both], 'c+', label=f"Both float (raw)")
     ax.set_ylabel("Ellipsoidal Height (m)")
     ax.legend()
     
     ax = axs[1]
-    diff = coords_raw - coords_int
-    dist = np.sqrt((diff**2).sum(axis=0)).squeeze()
+    diff = coords_raw - coords_int 
+    dist = np.sqrt((diff**2).sum(axis=1)).squeeze()
     ax.plot(gpst, dist, label="Distance (m)")
     ax.set_ylabel("Coordinate difference (m)")
 

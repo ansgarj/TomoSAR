@@ -222,20 +222,20 @@ class Settings:
         self.data["MOCOREF_ANTENNA"] = value
     
     @property
-    def RTKP_CONFIG(self) -> Path:
-        path = self.data.get("RTKP_CONFIG", None)
+    def PPK_CONFIG(self) -> Path:
+        path = self.data.get("PPK_CONFIG", None)
         if path is None:
             return None
         return Path(path)
     
-    @RTKP_CONFIG.setter
-    def RTKP_CONFIG(self, value: str|Path):
+    @PPK_CONFIG.setter
+    def PPK_CONFIG(self, value: str|Path):
         if not isinstance(value, (str, Path)):
-            raise ValueError("The RTKP_CONFIG settings take a path-like string as value")
+            raise ValueError("The PPK_CONFIG settings take a path-like string as value")
         path = Path(value)
         if not path.is_file():
             raise FileNotFoundError(f"The file {value} does not exist")
-        self.data["RTKP_CONFIG"] = str(path.resolve())
+        self.data["PPK_CONFIG"] = str(path.resolve())
 
     @property
     def DATA_DIRS(self) -> Path:
@@ -476,12 +476,12 @@ class Settings:
         self.data = DEFAULT
 
 def internal_file(key: str) -> str:
-    valid_keys = ["SATELLITES", "CHCI83", "RTKP_CONFIG", "SWEPOS_COORDINATES"]
+    valid_keys = ["SATELLITES", "CHCI83", "PPK_CONFIG", "SWEPOS_COORDINATES"]
     if key not in valid_keys:
         raise RuntimeError(f"Invalid key {key} for internal file. Valid keys: {valid_keys}")
     
     match key:
-        case "RTKP_CONFIG":
+        case "PPK_CONFIG":
             filename = "m8t_5hz.conf"
         case "SATELLITES":
             filename = "igs20_2385.atx"
@@ -502,7 +502,7 @@ DEFAULT = {
         "MOCOREF": "SWEREF99",
         "TARGET": "SWEREF99"
     },
-    "RTKP_CONFIG": internal_file("RTKP_CONFIG"),
+    "PPK_CONFIG": internal_file("PPK_CONFIG"),
     "DATA_DIRS": str(Path.home() / "Radar" / "Data"),
     "PROCESSING_DIRS": str(Path.home() / "Radar" / "Processing"),
     "TOMO_DIRS": str(Path.home() / "Radar" / "Tomograms"),

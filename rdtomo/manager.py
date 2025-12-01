@@ -117,9 +117,9 @@ def resource(path: str | Path | None, key: str = None, **kwargs) -> Iterator[Pat
 
     If no file is provided None is yielded.
 
-    Valid keys: 'SATELLITES', 'SWEPOS_COORDINATES', 'RTKP_CONFIG', 'RECEIVER' 'DEM'', 'CANOPY', 'TEST_FILE_SVB', 'TEST_FILE_SAVAR'
+    Valid keys: 'SATELLITES', 'SWEPOS_COORDINATES', 'PPK_CONFIG', 'RECEIVER' 'DEM'', 'CANOPY', 'TEST_FILE_SVB', 'TEST_FILE_SAVAR'
                 'NKG_VEL, NKG_CORR'
-    NOTE: RTKP_CONFIG takes satellites (optional) and receiver (optional) keywords 
+    NOTE: PPK_CONFIG takes satellites (optional) and receiver (optional) keywords 
     NOTE: RECEIVER takes antenna (required) and radome (optional) keywords
     NOTE: DEM and CANOPY take bounds (required) and res (required) keywords"""
     # Generate a local copy of a file
@@ -164,8 +164,8 @@ def resource(path: str | Path | None, key: str = None, **kwargs) -> Iterator[Pat
                     tmp_path = local_copy(path)
                 else:
                    raise ValueError(f"Path {path} read from settings {key} does not point to a file.") 
-        case "RTKP_CONFIG":
-            filename = Settings().RTKP_CONFIG
+        case "PPK_CONFIG":
+            filename = Settings().PPK_CONFIG
             if filename:
                 path = Path(filename)
                 if path.is_file():
