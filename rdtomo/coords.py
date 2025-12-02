@@ -537,13 +537,13 @@ class Pos:
         self._enu = None
         return self
 
-    def to_enu(self, *coordinates: Pos|float|np.ndarray|tuple[float|np.ndarray, ...]) -> DeltaPos:
+    def diff(self, *coordinates: Pos|float|np.ndarray|tuple[float|np.ndarray, ...]) -> DeltaPos:
         """Returns the input ECEF coordinates in the local ENU coordinates of this object.
         
         Returns DeltaPos object"""
         return Pos(*coordinates, epoch=self.t.copy(), frame=self.frame) - self
     
-    def to_ecef(self, *coordinates: DeltaPos|float|np.ndarray|tuple[float|np.ndarray, ...]) -> Pos:
+    def add(self, *coordinates: DeltaPos|float|np.ndarray|tuple[float|np.ndarray, ...]) -> Pos:
         """Returns the input ENU coordinates, assumed to be in the local frame of this object,
         in the ECEF coordinates of the matching frame.
         

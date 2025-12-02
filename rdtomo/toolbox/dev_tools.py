@@ -259,10 +259,12 @@ def ppk_frames(
     ) as data:
         if use_swepos and not elevation_mask:
             if not use_broadcast:
-                elevation_mask = 20 # Precise 
+                elevation_mask = 15 # Precise 
             else:
                 elevation_mask = 5
-        coords_itrf, results_itrf = run_ppk(
+        print(f"Path {path} is {type(path)}")
+        print(f"Data container {data.container} exists: {data.container.exists()} and is {'dir' if data.container.is_dir() else 'file'}")
+        coords_uni, results_uni = run_ppk(
             rover_obs=data.drone_rnx_obs,
             base_obs=data.base_obs,
             nav_file=data.drone_rnx_nav,
@@ -273,58 +275,59 @@ def ppk_frames(
             atx_file=atx,
             receiver_file=receiver,
             precise=not use_broadcast,
-            out_path=data.drone_rnx_obs.with_suffix(".pos"),
+            out_path=None,
+            download_dir=data.container,
             config_file=config,
             elevation_mask=elevation_mask,
             mocoref_file=data.mocoref,
-            retain=False
+            retain=True
         )
         print()
-        st = Settings()
-        coords_mf, results_mf = run_ppk(
+        coords_div, results_div = run_ppk(
             rover_obs=data.drone_rnx_obs,
             base_obs=data.base_obs,
             nav_file=data.drone_rnx_nav,
             sbs_file=data.drone_rnx_sbs,
-            sp3_file=results_itrf["sp3"],
-            clk_file=results_itrf["clk"],
-            inx_file=results_itrf["inx"],
+            sp3_file=results_uni["sp3"],
+            clk_file=results_uni["clk"],
+            inx_file=results_uni["inx"],
             precise=not use_broadcast,
-            out_path=data.drone_rnx_obs.with_suffix(".pos"),
+            out_path=None,
+            download_dir=data.container,
             config_file=config,
             elevation_mask=elevation_mask,
             mocoref_file=data.mocoref,
-            processing_frame=st.MOCOREF_FRAME
+            unify_input_frames=False
         )
     
-    gpst, q_itrf = results_itrf["gpst"], results_itrf["quality"]
-    q_mf = results_mf["quality"]
+    gpst, q_uni = results_uni["gpst"], results_uni["quality"]
+    q_div = results_div["quality"]
 
     # Index tracking
-    int_only = (q_itrf != 1) & (q_mf == 1)
-    raw_only = (q_mf != 1) & (q_itrf == 1)
-    both = (q_itrf != 1) & (q_mf != 1)
+    int_only = (q_uni != 1) & (q_div == 1)
+    raw_only = (q_div != 1) & (q_uni == 1)
+    both = (q_uni != 1) & (q_div != 1)
     
     fig, axs = plt.subplots(3, 1, squeeze=False, figsize=(12, 12), sharex=True, tight_layout=True)
     axs = axs.flatten()
     ax = axs[0]
     #ax.plot(gpst, coords_precise[:,2], 'g-', label=f"Precise")
-    ax.plot(gpst, coords_itrf.h, 'g-', label=f"ITRF2020 track changed to {st.MOCOREF_FRAME}")
-    ax.plot(gpst, coords_mf.h, 'b:', label=f"Assumed {st.MOCOREF_FRAME} track")
-    ax.plot(gpst[int_only], coords_itrf.h[int_only], 'r+', label=f"ITRF2020 only float")
-    ax.plot(gpst[raw_only], coords_mf.h[raw_only], 'm+', label=f"{st.MOCOREF_FRAME} only float")
-    ax.plot(gpst[both], coords_itrf.h[both], 'y+', label=f"Both float (ITRF2020)")
-    ax.plot(gpst[both], coords_mf.h[both], 'c+', label=f"Both float ({st.MOCOREF_FRAME})")
+    ax.plot(gpst, coords_uni.h, 'g-', label=f"Track unified frames")
+    ax.plot(gpst, coords_div.h, 'b:', label=f"Track divergent frames")
+    ax.plot(gpst[int_only], coords_uni.h[int_only], 'r+', label=f"Unified only float")
+    ax.plot(gpst[raw_only], coords_div.h[raw_only], 'm+', label=f"Divergent only float")
+    ax.plot(gpst[both], coords_uni.h[both], 'y+', label=f"Both float (Unified)")
+    ax.plot(gpst[both], coords_div.h[both], 'c+', label=f"Both float (Divergent)")
     ax.set_ylabel("Ellipsoidal Height (m)")
     ax.legend()
     
     ax = axs[1]
-    ax.plot(gpst, (coords_mf - coords_itrf).norm(), label="Distance (m)")
+    ax.plot(gpst, (coords_div - coords_uni).norm(), label="Distance (m)")
     ax.set_ylabel("Coordinate difference (m)")
 
     ax = axs[2]
-    ax.plot(gpst, results_itrf["ratio"], 'g-', label="ITRF2020")
-    ax.plot(gpst, results_mf["ratio"], 'r-', label=f"{st.MOCOREF_FRAME}")
+    ax.plot(gpst, results_uni["ratio"], 'g-', label="Unified")
+    ax.plot(gpst, results_div["ratio"], 'r-', label=f"Divergent")
     ax.set_ylabel("AR Ratio")
     ax.legend()
 

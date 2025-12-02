@@ -470,7 +470,6 @@ class DataDir(LoadDir):
         else:
             data.base_nav = None
 
-        settings = Settings()
         with ExitStack() as stack:
             # Generate a temporary directory for file holding
             if Path("data.tmp").exists():
@@ -661,7 +660,7 @@ class DataDir(LoadDir):
             if use_header:
                 data.base_pos, data.mocoref = generate_mocoref(header_pos, generate=True, output_dir=data.container)
         
-        yield data
+            yield data
 
     def init(
             self,

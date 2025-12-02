@@ -455,7 +455,7 @@ def rnx2rtkp(
         radome: str = "NONE",
         constellations: list[str] = [],
         freqs: str = "",
-        processing_frame: str = "ITRF"
+        unify_input_frames: bool = True
 ) -> str:
     """Runs RTKLIB's rnx2rtkp with dynamic command construction based on available resources."""
     cmd = ['rnx2rtkp']
@@ -470,11 +470,12 @@ def rnx2rtkp(
         cmd.extend(['-m', elevation_mask])
     if constellations:
         cmd.extend(["-sys", ",".join(constellations), "-f", freqs])
-    if mocoref_pos:
-        cmd.extend(["-r", *mocoref_pos.reframe(processing_frame)])
-    elif mocoref_file:
-        mocoref_pos, _ = generate_mocoref(mocoref_file, type=mocoref_type, line=mocoref_line, generate=False)
-        cmd.extend(["-r", *mocoref_pos.reframe(processing_frame)])
+    if mocoref_pos or mocoref_file:
+        if not mocoref_pos:
+            mocoref_pos, _ = generate_mocoref(mocoref_file, type=mocoref_type, line=mocoref_line, generate=False)
+        if unify_input_frames:
+            mocoref_pos.reframe("ITRF")
+        cmd.extend(["-r", *mocoref_pos])
     with resource(base_obs) as tmp_obs:
         if antenna_type:
             update_antenna(tmp_obs, antenna=antenna_type, radome=radome)
@@ -717,9 +718,11 @@ def splice_sp3(eph_files: list[Path], force: bool = False, output_dir: Path|str|
     if not merged_file:
         return None
     if merged_file.exists() and not force:
-        print(f"Discovered merged file {local(merged_file)}. Aborting merge of SP3 files.")
+        if len(eph_files) != 1:
+            print(f"Discovered merged file {local(merged_file)}. Aborting merge of SP3 files.")
         return merged_file
-    print(f"Merging SP3 files > {local(merged_file)} ...", end=" ", flush=True)
+    if len(eph_files) != 1:
+        print(f"Merging SP3 files > {local(merged_file)} ...", end=" ", flush=True)
     # Write spliced file
     with merged_file.open("w", encoding="utf-8") as out_file:
         first_epoch = False
@@ -754,9 +757,11 @@ def splice_clk(clk_files: list[Path], output_dir: Path, force: bool = False) -> 
     if not merged_file:
         return None
     if merged_file.exists() and not force:
-        print(f"Discovered merged file {local(merged_file)}. Aborting merge of CLK files.")
+        if len(clk_files) != 1:
+            print(f"Discovered merged file {local(merged_file)}. Aborting merge of CLK files.")
         return merged_file
-    print(f"Merging CLK files > {local(merged_file)} ...", end=" ", flush=True)
+    if len(clk_files) != 1:
+        print(f"Merging CLK files > {local(merged_file)} ...", end=" ", flush=True)
     # Write spliced file
     with merged_file.open("w", encoding="utf-8") as out_file:
         for i, file_path in enumerate(clk_files):
@@ -793,9 +798,11 @@ def splice_dcb(dcb_files: list[Path], output_dir: Path, force: bool = False) -> 
     if not merged_file:
         return None
     if merged_file.exists() and not force:
-        print(f"Discovered merged file {local(merged_file)}. Aborting merge of Bias-SINEX files.")
+        if len(dcb_files) != 1:
+            print(f"Discovered merged file {local(merged_file)}. Aborting merge of Bias-SINEX files.")
         return merged_file
-    print(f"Merging Bias-SINEX files > {local(merged_file)} ...", end=" ", flush=True)
+    if len(dcb_files) != 1:
+        print(f"Merging Bias-SINEX files > {local(merged_file)} ...", end=" ", flush=True)
     # Write spliced file
     with merged_file.open("w", encoding="utf-8") as out_file:
         for i, file_path in enumerate(dcb_files):
@@ -841,9 +848,11 @@ def splice_inx(inx_files: list[Path], output_dir: Path, force: bool = False) -> 
     if not merged_file:
         return None
     if merged_file.exists() and not force:
-        print(f"Discovered merged file {local(merged_file)}. Aborting merge of INX files.")
+        if len(inx_files) != 1:
+            print(f"Discovered merged file {local(merged_file)}. Aborting merge of INX files.")
         return merged_file
-    print(f"Merging INX files > {local(merged_file)} ...", end=" ", flush=True)
+    if len(inx_files) != 1:
+        print(f"Merging INX files > {local(merged_file)} ...", end=" ", flush=True)
     # Write spliced file
     tec_lines = []
     rms_lines = []
@@ -1315,13 +1324,12 @@ def merge_swepos_rinex(files: list[str|Path], output_dir: Path) -> tuple[Path|No
     return merged_obs, merged_nav
 
 # Read output
-def read_rnx2rtkp_out(input: str|Path, processing_frame: str = "ITRF") -> tuple[Pos, dict]:
+def read_rnx2rtkp_out(input: str|Path) -> tuple[Pos, dict]:
     """Parses a rnx2rtkp .pos file.
     Returns:
         - pos: position of rover as Pos object
         - results: dict with keys
-            - "Pos": Pos object with solution
-            - "SD": Standard deviation in ENU,
+            - "SD": Standard deviation of rover pos solution in ENU as a DeltaPos object,
             - "ration": AR ratio,
             - "gps_week": GPS week of each point
             - "gpst": GPST (s) of each point, as seconds into current week
@@ -1373,7 +1381,7 @@ def read_rnx2rtkp_out(input: str|Path, processing_frame: str = "ITRF") -> tuple[
     # Auto-detect coordinate columns
     results = {}
     if data.shape[1] >= 5:
-        pos = Pos.geodetic(data[:,2:5], lat_first=True, epoch=get_epoch(data[:, 0:2]), frame=processing_frame).reframe(Settings().TARGET_FRAME)
+        pos = Pos.geodetic(data[:,2:5], lat_first=True, epoch=get_epoch(data[:, 0:2]), frame="ITRF").reframe(Settings().TARGET_FRAME)
         results["SD"] = DeltaPos(data[:, [8,7,9]])      # ENU SD
         results["ratio"] = data[:, 14]                  # AR ratio
         results["gps_week"] = data[:, 0]                # GPS week
@@ -1389,10 +1397,8 @@ def read_glab_out(input: str|Path, verbose: bool = False) -> tuple[Pos, dict]:
     Returns:
         - pos: position of base as Pos object
         - results: dict with keys:
-            - "position": final position in ITRF
             - "epochs": decimal year of all solution positions
-            - "epoch": nominal (median) epoch
-            - "residuals": residuals of solution from position
+            - "residuals": DeltaPos object with residuals of solution from position in ENU
             - "convergence_idx": convergence index
             - "convergence_time": time into file for convergence
             - "convergence_duration": duration during wich the solution had converged
@@ -1472,11 +1478,6 @@ def read_glab_out(input: str|Path, verbose: bool = False) -> tuple[Pos, dict]:
     y_mean = np.nanmean(y[conv])
     z_mean = np.nanmean(z[conv])
 
-    # Residuals
-    x_res = x - x_mean
-    y_res = y - y_mean
-    z_res = z - z_mean
-
     st = Settings()
     if verbose or st.VERBOSE:
         print(f"PPP solution converged after {conv_time}, average taken over {total_time - conv_time}")
@@ -1486,8 +1487,7 @@ def read_glab_out(input: str|Path, verbose: bool = False) -> tuple[Pos, dict]:
 
     results = {
         "epochs": epoch,
-        "epoch": np.nanmedian(epoch),
-        "residuals": np.asarray([x_res, y_res, z_res]),
+        "residuals": pos.diff(x, y, z),
         "convergence_idx": idx,
         "convergence_time": conv_time,
         "convergence_duration": total_time - conv_time,
@@ -1926,31 +1926,42 @@ def ppk(
         retain: bool = False,
         raw: bool = False,
         force_splice: bool = False,
-        processing_frame: str = "ITRF"
+        unify_input_frames: bool = True
 ) -> tuple[Pos, dict]:
     """Performs PPK processing on the ROVER OBS relative BASE OBS, and stores position in out_path if not pointing to a folder.
     If if sp3_file (SP3 file) is provided, runs in precise mode (CLK file must be provided if the SP3 file is a pure orbit file).
     If precise is True and no SP3 file is provided matching precise ephemeris data will be downloaded from ESA (number of
     parallel downloads specified by max_downloads and each file is attempted up to max_retries times).
     
-    If a mocoref_file is provided the position of the BASE will be read from there (mocoref data can be read from CSV files, JSON
-    files, LLH logs or mocoref.moco logs as in tomosar.utils.generate_mocoref). Otherwise the BASE position will be read from the
-    BASE OBS header.
+    The mocoref_pos parameter specifies the BASE position. If not provided and if a mocoref_file is provided the position of the
+    BASE will be read from there (mocoref data can be read from CSV files, JSON files, LLH logs or mocoref.moco logs as in
+    tomosar.utils.generate_mocoref). Otherwise the BASE position will be read from the BASE OBS header.
     
-    If a config file is not provided, the Tomosar internal config will be used.
+    If a config file is not provided, the rd=tomo internal config will be used.
     
     If dry is True, the files needed to be downloaded will be displayed but no processing will be run (this will have no effect
-    if not run in precise mode). If retain is True the downloaded ephmeris data will be placed in the output directory, otherwise
+    if not run in precise mode). If retain is True the downloaded ephmerides data will be placed in the output directory, otherwise
     they will be stored in temporary files.
 
-    The raw parameter can be set to True in order NOT to use internal Tomosar resources.
+    The raw parameter can be set to True in order NOT to use internal rd-tomo resources.
     
-    The output directory is the folder containing the out_path, or the folder pointed to by the out_path.
+    The output directory is the folder containing the out_path, or the folder pointed to by the out_path, unless download_dir is
+    specified specifically.
+
+    If unify_input_frames is set to False, the BASE position will be input in whatever Reference Frame it is provided in, otherwise
+    it will be explicitly reframed to ITRF.
     
     Returns:
-    - A Nx3 array with the Pos (X, Y, Z)
-    - A Nx1 array with GPS time (seconds) for the Pos
-    - A Nx1 array with the quality conversion (Q) for the Pos"""
+    - pos: a Pos object with the rover position
+    - result: a dict with the following keys:
+        - "SD": Standard deviation of pos solution in ENU as a DeltaPos object,
+        - "ration": AR ratio of each point,
+        - "gps_week": GPS week of each point
+        - "gpst": GPST (s) of each point, as seconds into current week
+        - "quality": Q number
+        - "sp3": .SP3 Path or None
+        - "clk": .CLK Path or None
+        - "inx": .INX Path or None"""
 
     rover_obs = Path(rover_obs)
     if not rover_obs.is_file():
@@ -2073,7 +2084,7 @@ def ppk(
                     freqs=freqs,
                     antenna_type=antenna_type,
                     radome=radome,
-                    processing_frame=processing_frame
+                    unify_input_frames=unify_input_frames
                 )
             except RuntimeError:
                 # Try without Explorer specific options
@@ -2096,7 +2107,7 @@ def ppk(
                     freqs=freqs,
                     antenna_type=antenna_type,
                     radome=radome,
-                    processing_frame=processing_frame
+                    unify_input_frames=unify_input_frames
                 )
 
     if out_path:
@@ -2105,9 +2116,14 @@ def ppk(
         else:
             raise FileNotFoundError(f"Could not find generated .pos file: {out_path}")
 
-    pos, results = read_rnx2rtkp_out(out, processing_frame=processing_frame)
+    pos, results = read_rnx2rtkp_out(out)
     quality_conversion = np.sum(results["quality"] == 1) / len(results["quality"]) * 100
     print(f"Quality conversion: Q1 = {quality_conversion:.2f} %")
+
+    results["sp3"] = sp3_file if sp3_file.is_file() else None
+    results["clk"] = clk_file if clk_file.is_file() else None
+    results["inx"] = inx_file if inx_file.is_file() else None
+
     return pos, results
    
 def station_ppp(
@@ -2127,8 +2143,7 @@ def station_ppp(
         dry: bool = False,
         retain: bool = False,
         make_mocoref: bool = True,
-        force_splice: bool = False,
-        target_rf: str = "ITRF",
+        force_splice: bool = False
 ) -> tuple[Pos, dict]:
     """Runs static PPP on a base observation file by first downloading matching precise ephemeris files from gssc.esa.int.
     Input parameters:
@@ -2145,25 +2160,20 @@ def station_ppp(
     - retain: retains downloaded ephemeris data after finishing
     - mocoref: generate mocoref.moco file with position
     
-    Returns dict with keys:
-    - 'position': PPP processing determined position (ECEF in MOCOREF_FRAME)
-    - 'itrf_position': PPP processing determined position (ECEF in ITRF2020)
-    - 'epochs': epochs as decimal year
-    - 'epoch': median of epochs
-    - 'residuals': residuals from determined positon for all epochs with a solution
-    - 'convergence_idx': the index for which the solution converged
-    - 'convergence_time': timedelta object with time passed before convergence
-    - 'convergence_duration': timedelta object with time passed after convergence
-    - 'total_duration': timedelta object with total time passed with a solution
-    - 'lon': longitudinal coordinate of position (MOCOREF_FRAME)
-    - 'lat': latitudinal coordiante of position (MOCOREF_FRAME)
-    - 'h': ellipsoidal height of position (MOCOREF_FRAME)
-    - 'rotation': ecef_to_enu rotation matrix for position
-    - 'header_position': the approximate position specified in the RINEX OBS header
-    - 'sp3': path to .SP3 file (if retained, else None)
-    - 'clk': path to .CLK file (if retained, else None)
-    - 'inx': path to .INX file (if retained, else None)
-    - 'mocoref_file': path pointing to mocoref.moco file (if make_mocoref, else None)"""
+    Returns:
+    - pos: Pos object with solution
+    - dict with keys:
+        - "epochs": decimal year of all solution positions
+        - "residuals": DeltaPos object with residuals of solution from position in ENU
+        - "convergence_idx": convergence index
+        - "convergence_time": time into file for convergence
+        - "convergence_duration": duration during wich the solution had converged
+        - "total_duration": total duration for all solutions
+        - 'header_position': Pos object with the approximate position specified in the RINEX OBS header
+        - 'sp3': path to .SP3 file (if retained, else None)
+        - 'clk': path to .CLK file (if retained, else None)
+        - 'inx': path to .INX file (if retained, else None)
+        - 'mocoref_file': path pointing to generated mocoref.moco file (if make_mocoref, else None)"""
 
     obs_path = Path(obs_path)
     if not obs_path.is_file():

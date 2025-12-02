@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unrealeased]
+## [0.1.1] - Unreleased
 
 ### Added
 - `rdtomo.coords.Pos` class that functions as a simplified interface to manage coordinates and Reference Frames
@@ -12,6 +12,9 @@ All notable changes to this project will be documented in this file.
 - `rdtomo` functions should now use the `rdtomo.coords.Pos` class in most cases, except for internal calculations before initiating a `Pos` object (**exception**: `rdtomo.trackfinding` which requires a more thorough walkthrough)
 - Changed the name of `rdtomo.gnss.rtkp` to `rdtomo.gnss.ppk` to better match reality
 - `rdtomo.ppk` and `rdtomo.ppp` now return a tuple with the `Pos` object as the first entry and a dict with the rest of the results as the second
+
+### Fixed
+- Fixed bug in `rdtomo.data.DataDir.open()` that had been introduced somehow that caused it to close the temporary container prematurely
 
 ## [0.1.0] - 2025-11-28
 
