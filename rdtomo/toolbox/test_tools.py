@@ -44,7 +44,7 @@ def gnss(savar) -> None:
             raise RuntimeError("Download, unpacking or merging of RINEX files from Swepos failed. See above.")
 
         print()
-        base_pos, results = run_ppp(swepos_obs, swepos_nav, header=False, out_path=swepos_obs.with_suffix(".out"), retain=True, force_splice=True, target_rf=Settings().MOCOREF_FRAME)
+        base_pos, results = run_ppp(swepos_obs, swepos_nav, header=False, out_path=swepos_obs.with_suffix(".out"), retain=True, force_splice=True)
         sp3_file = results["sp3"] 
         clk_file = results["clk"]
         inx_file = results["inx"]
