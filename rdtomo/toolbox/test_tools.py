@@ -7,8 +7,8 @@ from matplotlib import pyplot as plt
 
 from ..gnss import fetch_swepos, station_ppp as run_ppp, ppk as run_ppk, ubx2rnx
 from ..manager import resource
-from ..coords import Pos
-from ..config import LOCAL
+from ..coords import DeltaPos
+from ..config import LOCAL, Settings
 from ..data import DataDir
 
 @click.group()
@@ -44,24 +44,23 @@ def gnss(savar) -> None:
             raise RuntimeError("Download, unpacking or merging of RINEX files from Swepos failed. See above.")
 
         print()
-        print("Running station PPP post processing on Swepos files ...")
-        results = run_ppp(swepos_obs, swepos_nav, header=False, out_path=swepos_obs.with_suffix(".out"), retain=True, force_splice=True)
+        base_pos, results = run_ppp(swepos_obs, swepos_nav, header=False, out_path=swepos_obs.with_suffix(".out"), retain=True, force_splice=True, target_rf=Settings().MOCOREF_FRAME)
         sp3_file = results["sp3"] 
         clk_file = results["clk"]
         inx_file = results["inx"]
-        
-        diff = results["position"] - results["header_position"]
-        distance = np.sqrt((diff**2).sum())
-        if distance < 0.01:
-            print(f"Distance: {distance:.3f} m (E: {diff[0]:.4f} m, N: {diff[1]:.4f} m, U: {diff[2]:.4f} m)")
+    
+        diff: DeltaPos = base_pos - results["header_position"]
+        if diff.norm() < 0.01:
+            print(f"Distance: {diff} (E: {diff.east[0]:.4f} m, N: {diff.north[0]:.4f} m, U: {diff.up[0]:.4f} m)")
             print("TEST: station PPP sucessfully achieved sub-centimetre accuracy")
             print()
         else:
+            print(f"Distance: {diff} (E: {diff.east[0]:.4f} m, N: {diff.north[0]:.4f} m, U: {diff.up[0]:.4f} m)")
             raise RuntimeError("Station PPP processing produced poor solution")
 
         # Run PPK
         out_path = rover_obs.with_suffix(".pos")
-        _, gpst, q = run_ppk(
+        _, result = run_ppk(
             rover_obs=rover_obs,
             base_obs=swepos_obs,
             nav_file=rover_nav,
@@ -71,12 +70,14 @@ def gnss(savar) -> None:
             inx_file=inx_file,
             precise=True
         )
+        q = result["quality"]
+        gpst = result["gpst"]
         try: 
             quality_conversion = np.sum(q == 1) / len(q) * 100
             dur = timedelta(seconds=(gpst[-1] - gpst[0]))
             print(f"Length of processed data: {dur}")
         except:
-            raise RuntimeError("rnx2rtkp failed to produce a .pos file with content")
+            raise RuntimeError("rnx2rtkp failed to produce a .pos file with valid content")
 
         if quality_conversion > 99 and dur == timedelta(minutes=10, seconds=1.6):
             print("TEST: PPK processing sucessful")
@@ -150,7 +151,7 @@ def station_ppp(
         elevation_mask = elevation_mask,
         minimal_overlap = minimal_overlap,
     ) as data:
-        results = run_ppp(
+        pos, results = run_ppp(
             data.base_obs,
             navglo_path=data.base_nav,
             atx_path=atx,
@@ -164,11 +165,9 @@ def station_ppp(
             header=False,
             make_mocoref=False
         )
-        pos = results["position"]
-        pos: Pos
-        diff = pos.to_enu(data.base_pos)    
+        diff = pos - data.base_pos
 
-    distance = np.sqrt((diff**2).sum())
+    distance = diff.norm()
     print(f"Distance: {distance:.2f} m (E: {diff[0]:.2f} m, N: {diff[1]:.2f} m, U: {diff[2]:.2f} m)")
 
 @test.command()
@@ -243,7 +242,7 @@ def precise_ppk(
     ) as data:
         if use_swepos and not elevation_mask:
             elevation_mask = 20 # Precise 
-        results_prec = run_ppk(
+        coords_prec, results_prec = run_ppk(
             rover_obs=data.drone_rnx_obs,
             base_obs=data.base_obs,
             nav_file=data.drone_rnx_nav,
@@ -264,7 +263,7 @@ def precise_ppk(
         print()
         if use_swepos and not elevation_mask:
             elevation_mask = 5 # Broadcast
-        results_bc = run_ppk(
+        coords_bc, results_bc = run_ppk(
             rover_obs=data.drone_rnx_obs,
             base_obs=data.base_obs,
             nav_file=data.drone_rnx_nav,
@@ -282,11 +281,8 @@ def precise_ppk(
             retain=False
         )
 
-    coords_prec, gpst, q_prec = results_prec["coordinates"], results_prec["gpst"], results_prec["quality"]
-    coords_bc, q_bc = results_bc["coordinates"], results_bc["quality"]
-
-    coords_prec: Pos
-    coords_bc: Pos
+    gpst, q_prec = results_prec["gpst"], results_prec["quality"]
+    q_bc = results_bc["quality"]
 
     # Index tracking
     precise_only = (q_prec != 1) & (q_bc == 1)
@@ -308,8 +304,7 @@ def precise_ppk(
 
     ax = axs[1]
     diff = coords_bc - coords_prec
-    dist = np.sqrt((diff**2).sum(axis=1)).squeeze()
-    ax.plot(gpst, dist, label="Distance (m)")
+    ax.plot(gpst, diff.norm(), label="Distance (m)")
     ax.set_ylabel("Coordinate difference (m)")
 
     ax = axs[2]
@@ -399,7 +394,7 @@ def ppk(
                 elevation_mask = 20 # Precise 
             else:
                 elevation_mask = 5
-        results_int = run_ppk(
+        coords_int, results_int = run_ppk(
             rover_obs=data.drone_rnx_obs,
             base_obs=data.base_obs,
             nav_file=data.drone_rnx_nav,
@@ -417,7 +412,7 @@ def ppk(
             retain=False
         )
         print()
-        results_raw = run_ppk(
+        coords_raw, results_raw = run_ppk(
             rover_obs=data.drone_rnx_obs,
             base_obs=data.base_obs,
             nav_file=data.drone_rnx_nav,
@@ -433,11 +428,8 @@ def ppk(
             raw=True
         )
     
-    coords_int, gpst, q_int = results_int["coordinates"], results_int["gpst"], results_int["quality"]
-    coords_raw, q_raw = results_raw["coordinates"], results_raw["quality"]
-
-    coords_int: Pos
-    coords_raw: Pos
+    gpst, q_int = results_int["gpst"], results_int["quality"]
+    q_raw = results_raw["quality"]
 
     # Index tracking
     int_only = (q_int != 1) & (q_raw == 1)
@@ -459,8 +451,7 @@ def ppk(
     
     ax = axs[1]
     diff = coords_raw - coords_int 
-    dist = np.sqrt((diff**2).sum(axis=1)).squeeze()
-    ax.plot(gpst, dist, label="Distance (m)")
+    ax.plot(gpst, diff.norm(), label="Distance (m)")
     ax.set_ylabel("Coordinate difference (m)")
 
     ax = axs[2]

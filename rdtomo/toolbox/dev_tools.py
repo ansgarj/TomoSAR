@@ -9,7 +9,7 @@ import csv
 import struct
 import numpy as np
 
-from ..gnss import extract_rnx_info, read_glab_out, rtkp as run_rtkp
+from ..gnss import extract_rnx_info, read_glab_out, ppk as run_ppk
 from ..config import PACKAGE_PATH, Settings
 from .setup_tools import install_changed
 from ..data import DataDir
@@ -208,7 +208,7 @@ def inspect_out(file: Path) -> None:
 @click.option("--offset", type=float, default=-0.079, help="Specify vertical PCO between mocoref data log receiver and drone processing receiver (default=-0.079) for CSV files")
 @click.option("--overlap", "minimal_overlap", type=float, default=10, help="Specify minimal overlap between base OBS and drone flight in minutes (default: 10 minutes)")
 @click.option("-k", "--config", type=click.Path(exists=True, path_type=Path), default=None, help="Specify external config file for rnx2rtkp")
-def rtkp_frames(
+def ppk_frames(
     path: DataDir,
     use_swepos: bool,
     use_ppp: bool,
@@ -233,7 +233,7 @@ def rtkp_frames(
     config: Path,
 ) -> None:
     """Compare solutions from processing with explicit ITRF -> TARGET_FRAME transformation and assuming track is in same frame as
-    reference base coordinates. This test opens a Data Directory and runs RTKP post processing."""
+    reference base coordinates. This test opens a Data Directory and runs PPK."""
 
     with path.open(
         require_drone=True,
@@ -262,7 +262,7 @@ def rtkp_frames(
                 elevation_mask = 20 # Precise 
             else:
                 elevation_mask = 5
-        results_itrf = run_rtkp(
+        coords_itrf, results_itrf = run_ppk(
             rover_obs=data.drone_rnx_obs,
             base_obs=data.base_obs,
             nav_file=data.drone_rnx_nav,
@@ -281,7 +281,7 @@ def rtkp_frames(
         )
         print()
         st = Settings()
-        results_mf = run_rtkp(
+        coords_mf, results_mf = run_ppk(
             rover_obs=data.drone_rnx_obs,
             base_obs=data.base_obs,
             nav_file=data.drone_rnx_nav,
@@ -297,8 +297,8 @@ def rtkp_frames(
             processing_frame=st.MOCOREF_FRAME
         )
     
-    coords_itrf, gpst, q_itrf = results_itrf["coordinates"], results_itrf["gpst"], results_itrf["quality"]
-    coords_mf, q_mf = results_mf["coordinates"], results_mf["quality"]
+    gpst, q_itrf = results_itrf["gpst"], results_itrf["quality"]
+    q_mf = results_mf["quality"]
 
     # Index tracking
     int_only = (q_itrf != 1) & (q_mf == 1)
@@ -309,19 +309,17 @@ def rtkp_frames(
     axs = axs.flatten()
     ax = axs[0]
     #ax.plot(gpst, coords_precise[:,2], 'g-', label=f"Precise")
-    ax.plot(gpst, coords_itrf[2,:], 'g-', label=f"ITRF2020 track changed to {st.MOCOREF_FRAME}")
-    ax.plot(gpst, coords_mf[2,:], 'b:', label=f"Assumed {st.MOCOREF_FRAME} track")
-    ax.plot(gpst[int_only], coords_itrf[2, int_only], 'r+', label=f"ITRF2020 only float")
-    ax.plot(gpst[raw_only], coords_mf[2, raw_only], 'm+', label=f"{st.MOCOREF_FRAME} only float")
-    ax.plot(gpst[both], coords_itrf[2, both], 'y+', label=f"Both float (ITRF2020)")
-    ax.plot(gpst[both], coords_mf[2, both], 'c+', label=f"Both float ({st.MOCOREF_FRAME})")
+    ax.plot(gpst, coords_itrf.h, 'g-', label=f"ITRF2020 track changed to {st.MOCOREF_FRAME}")
+    ax.plot(gpst, coords_mf.h, 'b:', label=f"Assumed {st.MOCOREF_FRAME} track")
+    ax.plot(gpst[int_only], coords_itrf.h[int_only], 'r+', label=f"ITRF2020 only float")
+    ax.plot(gpst[raw_only], coords_mf.h[raw_only], 'm+', label=f"{st.MOCOREF_FRAME} only float")
+    ax.plot(gpst[both], coords_itrf.h[both], 'y+', label=f"Both float (ITRF2020)")
+    ax.plot(gpst[both], coords_mf.h[both], 'c+', label=f"Both float ({st.MOCOREF_FRAME})")
     ax.set_ylabel("Ellipsoidal Height (m)")
     ax.legend()
     
     ax = axs[1]
-    diff = coords_mf - coords_itrf
-    dist = np.sqrt((diff**2).sum(axis=0)).squeeze()
-    ax.plot(gpst, dist, label="Distance (m)")
+    ax.plot(gpst, (coords_mf - coords_itrf).norm(), label="Distance (m)")
     ax.set_ylabel("Coordinate difference (m)")
 
     ax = axs[2]

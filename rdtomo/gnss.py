@@ -20,7 +20,7 @@ from .version import version
 from .config import Settings
 from .utils import prompt_ftp_login, gunzip, warn, local, string_sub, date_to_gps_week, gps_week_to_date, leap_seconds, parse_datetime_string
 from .manager import run, tmp, resource, modify_config
-from .coords import Pos, geo_to_ecef, ecef_to_geo
+from .coords import Pos, geo_to_ecef, ecef_to_geo, DeltaPos
 
 # Named functions for binary executables
 def crx2rnx(crx_file: str|Path) -> Path:
@@ -1157,18 +1157,16 @@ def find_station(rover_pos, stations_path: str|Path = None):
     """
 
     # Load the station Pos
-    with resource(stations_path, 'SWEPOS_Pos') as f:
+    with resource(stations_path, 'SWEPOS_COORDINATES') as f:
         df = pd.read_csv(f, encoding='utf-8-sig')
 
     # Define Euclidean distance
-    def euclidean_distance(x1: float, y1: float, z1: float, x2: float, y2: float, z2: float) -> float:
-        return math.sqrt((x1 - x2)**2 + (y1 - y2)**2 + (z1 - z2)**2)
-
-    flight_x, flight_y, flight_z = rover_pos
+    def euclidean_distance(x1: float|np.ndarray, y1: float|np.ndarray, z1: float|np.ndarray, x2: float|np.ndarray, y2: float|np.ndarray, z2: float|np.ndarray) -> float|np.ndarray:
+        return np.sqrt((x1 - x2)**2 + (y1 - y2)**2 + (z1 - z2)**2)[0]
 
     # Compute distances
     df['Distance'] = df.apply(lambda row: euclidean_distance(
-        flight_x, flight_y, flight_z,
+        *rover_pos,
         row['SW99_X'], row['SW99_Y'], row['SW99_Z']
     ), axis=1)
 
@@ -1317,16 +1315,18 @@ def merge_swepos_rinex(files: list[str|Path], output_dir: Path) -> tuple[Path|No
     return merged_obs, merged_nav
 
 # Read output
-def read_rnx2rtkp_out(input: str|Path, processing_frame: str = "ITRF") -> dict:
+def read_rnx2rtkp_out(input: str|Path, processing_frame: str = "ITRF") -> tuple[Pos, dict]:
     """Parses a rnx2rtkp .pos file.
-    Returns dict with keys:
-        - "Pos": Pos object with solution
-        - "SD": Standard deviation in ENU,
-        - "ration": AR ratio,
-        - "gps_week": GPS week of each point
-        - "gpst": GPST (s) of each point, as seconds into current week
-        - "quality": Q number
-        """
+    Returns:
+        - pos: position of rover as Pos object
+        - results: dict with keys
+            - "Pos": Pos object with solution
+            - "SD": Standard deviation in ENU,
+            - "ration": AR ratio,
+            - "gps_week": GPS week of each point
+            - "gpst": GPST (s) of each point, as seconds into current week
+            - "quality": Q number
+    """
     
     if isinstance(input, str):
         lines = input.splitlines()
@@ -1373,29 +1373,31 @@ def read_rnx2rtkp_out(input: str|Path, processing_frame: str = "ITRF") -> dict:
     # Auto-detect coordinate columns
     results = {}
     if data.shape[1] >= 5:
-        results["Pos"] = Pos.geodetic(data[:,2:5].T, lat_first=True, epoch=get_epoch(data[:, 0:2]), frame=processing_frame).reframe(Settings().TARGET_FRAME)
-        results["SD"] = data[:, 7:10].T         # NEU SD
-        results["ratio"] = data[:, 14]          # AR ratio
-        results["gps_week"] = data[:, 0]        # GPS week
-        results["gpst"] = data[:, 1]            # GPST (s) of week
-        results["quality"] = data[:, 5]         # Q number
+        pos = Pos.geodetic(data[:,2:5], lat_first=True, epoch=get_epoch(data[:, 0:2]), frame=processing_frame).reframe(Settings().TARGET_FRAME)
+        results["SD"] = DeltaPos(data[:, [8,7,9]])      # ENU SD
+        results["ratio"] = data[:, 14]                  # AR ratio
+        results["gps_week"] = data[:, 0]                # GPS week
+        results["gpst"] = data[:, 1]                    # GPST (s) of week
+        results["quality"] = data[:, 5]                 # Q number
     else:
         raise ValueError(f"Unexpected format in {input}: not enough columns")
     
-    return results
+    return pos, results
 
-def read_glab_out(input: str|Path, verbose: bool = False) -> dict:
+def read_glab_out(input: str|Path, verbose: bool = False) -> tuple[Pos, dict]:
     """Parses a glab .out file.
-    Returns dict with keys:
-        - "position": final position in ITRF
-        - "epochs": decimal year of all solution positions
-        - "epoch": nominal (median) epoch
-        - "residuals": residuals of solution from position
-        - "convergence_idx": convergence index
-        - "convergence_time": time into file for convergence
-        - "convergence_duration": duration during wich the solution had converged
-        - "total_duration": total duration for all solutions
-        """
+    Returns:
+        - pos: position of base as Pos object
+        - results: dict with keys:
+            - "position": final position in ITRF
+            - "epochs": decimal year of all solution positions
+            - "epoch": nominal (median) epoch
+            - "residuals": residuals of solution from position
+            - "convergence_idx": convergence index
+            - "convergence_time": time into file for convergence
+            - "convergence_duration": duration during wich the solution had converged
+            - "total_duration": total duration for all solutions
+    """
     x, y, z = [], [], []
     err, epoch = [], []
     x_err, y_err, z_err = [], [], []
@@ -1465,7 +1467,6 @@ def read_glab_out(input: str|Path, verbose: bool = False) -> dict:
     if not conv.any():
         raise RuntimeError(f"Station PPP failed to converge: {input if isinstance(input, Path) else 'gLAB OUTPUT'} (total runtime: {total_time})")
 
-
     # Mean position after convergence
     x_mean = np.nanmean(x[conv])
     y_mean = np.nanmean(y[conv])
@@ -1476,15 +1477,14 @@ def read_glab_out(input: str|Path, verbose: bool = False) -> dict:
     y_res = y - y_mean
     z_res = z - z_mean
 
-    # Geodetic Pos
     st = Settings()
     if verbose or st.VERBOSE:
         print(f"PPP solution converged after {conv_time}, average taken over {total_time - conv_time}")
     
+    # Position
     pos = Pos(x_mean, y_mean, z_mean, epoch=np.nanmedian(epoch), frame="ITRF").reframe(st.MOCOREF_FRAME)
 
     results = {
-        "position": pos,
         "epochs": epoch,
         "epoch": np.nanmedian(epoch),
         "residuals": np.asarray([x_res, y_res, z_res]),
@@ -1494,7 +1494,7 @@ def read_glab_out(input: str|Path, verbose: bool = False) -> dict:
         "total_duration": total_time,
     }
 
-    return results
+    return pos, results
   
 def detect_convergence_and_mean(x_vals, y_vals, z_vals, x_err, y_err, z_err, err, window_size=100, threshold_percentile=10, verbose: bool = False):
     # Residuals from full-series mean
@@ -1791,7 +1791,7 @@ def generate_mocoref(
     # Store position as Pos object
     if isinstance(timestamp, str):
         timestamp = parse_datetime_string(timestamp)
-    mocoref_pos = Pos.geodetic(mocoref_longitude, mocoref_latitude, mocoref_height + mocoref_antenna, epoch=timestamp, rf=Settings().MOCOREF_FRAME)
+    mocoref_pos = Pos.geodetic(mocoref_longitude, mocoref_latitude, mocoref_height + mocoref_antenna, epoch=timestamp, frame=Settings().MOCOREF_FRAME).reframe(output_frame)
 
     if generate or verbose:
         lines = []
@@ -1849,9 +1849,8 @@ def fetch_swepos(
         else:
             print("No valid timestamps found in the file.")
 
-        lon, lat, h = ecef_to_geo(*pos)
         if pos:
-            print(f"Approximate location: (lat: {lat}, lon: {lon}, h: {h:.3f})")
+            print(f"Approximate location: (lat: {pos.lat[0]}, lon: {pos.lon[0]}, h: {pos.h[0]:.3f})")
         else:
             print("No valid position could be extracted from the file.")
 
@@ -1894,8 +1893,6 @@ def fetch_swepos(
         if not merged_nav is None and not merged_nav.is_file():
             raise FileNotFoundError(f"Generated NAV file: {merged_nav} not found")
         
-        start_utc, _, etrs89_pos, _ = extract_rnx_info(merged_obs)
-        update_rinex_position(merged_obs, etrs89_pos)
         return merged_obs, merged_nav
 
 def ppk(
@@ -1924,7 +1921,7 @@ def ppk(
         raw: bool = False,
         force_splice: bool = False,
         processing_frame: str = "ITRF"
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[Pos, dict]:
     """Performs PPK processing on the ROVER OBS relative BASE OBS, and stores position in out_path if not pointing to a folder.
     If if sp3_file (SP3 file) is provided, runs in precise mode (CLK file must be provided if the SP3 file is a pure orbit file).
     If precise is True and no SP3 file is provided matching precise ephemeris data will be downloaded from ESA (number of
@@ -2102,10 +2099,10 @@ def ppk(
         else:
             raise FileNotFoundError(f"Could not find generated .pos file: {out_path}")
 
-    results = read_rnx2rtkp_out(out, processing_frame=processing_frame)
+    pos, results = read_rnx2rtkp_out(out, processing_frame=processing_frame)
     quality_conversion = np.sum(results["quality"] == 1) / len(results["quality"]) * 100
     print(f"Quality conversion: Q1 = {quality_conversion:.2f} %")
-    return results
+    return pos, results
    
 def station_ppp(
         obs_path: str|Path,
@@ -2125,7 +2122,8 @@ def station_ppp(
         retain: bool = False,
         make_mocoref: bool = True,
         force_splice: bool = False,
-) -> dict:
+        target_rf: str = "ITRF",
+) -> tuple[Pos, dict]:
     """Runs static PPP on a base observation file by first downloading matching precise ephemeris files from gssc.esa.int.
     Input parameters:
     - navglo_path: file containing navigation data for GLONASS (can be a merged/general navigation file)
@@ -2240,32 +2238,29 @@ def station_ppp(
         raise FileNotFoundError(f"Cannot find generated out file: {out_path}")
 
     # Extract position
-    results = read_glab_out(out, verbose=True)
-    results["header_position"] = np.asarray(approx_pos)
+    pos, results = read_glab_out(out, verbose=True)
+    results["header_position"] = approx_pos
     results["sp3"] = sp3_file if sp3_file.is_file() else None
     results["clk"] = clk_file if clk_file.is_file() else None
     results["inx"] = inx_file if inx_file.is_file() else None
 
     if header:
         # Compare against header
-        diff = results["rotation"] @ (results["postion"] - approx_pos)
-        distance = math.sqrt((diff**2).sum())
+        diff = pos - approx_pos
+        distance = diff.norm()
         print(f"Header position shifted: {distance:.3} m (E: {diff[0]:.3} m, N: {diff[1]:.3} m, U: {diff[2]:.3} m)")
         update_rinex_position(obs_path, results["position"])
         
-    if make_mocoref:
-        settings = Settings()
-        mocoref = {
-            settings.MOCOREF_LATITUDE: results["lat"],
-            settings.MOCOREF_LONGITUDE: results["lon"],
-            settings.MOCOREF_HEIGHT: results["h"],
-            settings.MOCOREF_ANTENNA: 0.
-        }
-        _, results["mocoref_file"] = generate_mocoref(mocoref, timestamp=results['epoch'], generate=True)
-    else:
-        results["mocoref_file"] = None
+    settings = Settings()
+    mocoref = {
+        settings.MOCOREF_LATITUDE: pos.lat[0],
+        settings.MOCOREF_LONGITUDE: pos.lon[0],
+        settings.MOCOREF_HEIGHT: pos.h[0],
+        settings.MOCOREF_ANTENNA: 0.
+    }
+    pos, results["mocoref_file"] = generate_mocoref(mocoref, timestamp=results['epoch'], generate=make_mocoref, output_frame=target_rf)
 
-    return results
+    return pos, results
     
 def reachz2rnx(archive: Path|str, reference_date: datetime|None = None, output_dir: str|Path|None = None, rnx_file: Path|str|None = None, nav: bool = False, verbose: bool = False) -> tuple[dict[Path, dict], tuple[Path|None, Path|None, Path|None]]:
     """Extracts a Reach .zip archive to produce:

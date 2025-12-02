@@ -637,7 +637,7 @@ class DataDir(LoadDir):
                         raise FileNotFoundError(f"Could not find valid base OBS.")
             
                 if use_ppp:
-                    results = station_ppp(
+                    data.base_pos, results = station_ppp(
                         obs_path=data.base_obs,
                         navglo_path=data.base_nav,
                         atx_path=atx,
@@ -653,7 +653,6 @@ class DataDir(LoadDir):
                         retain=True,
                         make_mocoref=True
                     )
-                    data.base_pos = results['position']
                     data.sp3 = results['sp3'] 
                     data.clk = results['clk']
                     data.inx = results['inx']
@@ -661,9 +660,9 @@ class DataDir(LoadDir):
 
             if use_header:
                 mocoref_dict = {
-                    settings.MOCOREF_LATITUDE: header_pos.lat,
-                    settings.MOCOREF_LONGITUDE: header_pos.lon,
-                    settings.MOCOREF_HEIGHT: header_pos.h,
+                    settings.MOCOREF_LATITUDE: header_pos.lat[0],
+                    settings.MOCOREF_LONGITUDE: header_pos.lon[0],
+                    settings.MOCOREF_HEIGHT: header_pos.h[0],
                     settings.MOCOREF_ANTENNA: 0.
                 }
                 data.base_pos, data.mocoref = generate_mocoref(mocoref_dict, timestamp=data.base_epoch(), generate=True, output_dir=data.container)
@@ -869,7 +868,7 @@ class ProcessingDir(LoadDir):
         print("Running init")
         self.open(atx=atx, receiver=receiver, minimal_overlap=minimal_overlap)
         
-        results = ppk(
+        coords, results = ppk(
             rover_obs=self.data.drone_rnx_obs,
             base_obs=self.data.base_obs,
             nav_file=self.data.drone_rnx_nav,
@@ -884,13 +883,13 @@ class ProcessingDir(LoadDir):
             download_dir=self.ground_dir,
             config_file=config,
             elevation_mask=elevation_mask,
+            mocoref_pos=self.data.base_pos,
             mocoref_file=self.data.mocoref,
             retain=True,
             max_downloads=max_downloads,
             max_retries=download_attempts
         )
-        coords, gpst, q = results["coordinates"], results["gpst"], results["quality"]
-        coords: Pos
+        gpst, q = results["gpst"], results["quality"]
 
         fig, axs = plt.subplots(2, 1, squeeze=False, figsize=(8, 8))
         axs = axs.flatten()
