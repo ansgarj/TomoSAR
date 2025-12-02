@@ -659,13 +659,7 @@ class DataDir(LoadDir):
                     data.mocoref = results['mocoref_file']
 
             if use_header:
-                mocoref_dict = {
-                    settings.MOCOREF_LATITUDE: header_pos.lat[0],
-                    settings.MOCOREF_LONGITUDE: header_pos.lon[0],
-                    settings.MOCOREF_HEIGHT: header_pos.h[0],
-                    settings.MOCOREF_ANTENNA: 0.
-                }
-                data.base_pos, data.mocoref = generate_mocoref(mocoref_dict, timestamp=data.base_epoch(), generate=True, output_dir=data.container)
+                data.base_pos, data.mocoref = generate_mocoref(header_pos, generate=True, output_dir=data.container)
         
         yield data
 
