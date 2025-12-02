@@ -68,8 +68,11 @@ class DeltaPos:
     def coords(self) -> npt.NDArray[np.floating]:
         return self._coords
     
-    def norm(self) -> npt.NDArray[np.floating]:
-        return np.sqrt((self.coords**2).sum(axis=1).squeeze())
+    def norm(self, horizontal: bool = False, vertical: bool = False) -> npt.NDArray[np.floating]:
+        if vertical:
+            return np.abs(self.up)
+        i = 2 if horizontal else 3
+        return np.sqrt((self.coords[:,0:i]**2).sum(axis=1).squeeze())
     
     def __len__(self) -> int:
         """Number of points"""
@@ -169,7 +172,8 @@ class Pos:
         self.frame = Settings().resolve_frame(frame)
 
         # Ensure coordinates is an array
-        coordinates: np.ndarray = np.asarray(coordinates, dtype=float)
+        if not isinstance(coordinates, np.ndarray):
+            coordinates = np.array(coordinates, dtype=float).T
 
         # Validate dimensions
         if coordinates.ndim == 1:
@@ -277,7 +281,9 @@ class Pos:
         self.frame = Settings().resolve_frame(frame)
 
         # Ensure coordinates is an array
-        coordinates: np.ndarray = np.asarray(coordinates, dtype=float)
+        if not isinstance(coordinates, np.ndarray):
+            coordinates = np.array(coordinates, dtype=float).T
+        
 
         # Validate dimensions
         if coordinates.ndim == 1:

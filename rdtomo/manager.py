@@ -367,7 +367,7 @@ def modify_config(
                 armode_found = True
         if ionofile:
             if line.strip().startswith('file-ionofile'):
-                lines[i] = f'file-ionofile      ={ionofile}\n'
+                lines[i] = f'file-ionofile      ={ionofile.resolve()}\n'
                 iono_found = True
 
     # Append missing fields if not found

@@ -659,7 +659,8 @@ class DataDir(LoadDir):
 
             if use_header:
                 data.base_pos, data.mocoref = generate_mocoref(header_pos, generate=True, output_dir=data.container)
-        
+
+            print()
             yield data
 
     def init(
@@ -858,7 +859,6 @@ class ProcessingDir(LoadDir):
             elevation_mask: float|None = None,
             minimal_overlap: timedelta|float = timedelta(minutes=10)
         ) -> None:
-        print("Running init")
         self.open(atx=atx, receiver=receiver, minimal_overlap=minimal_overlap)
         
         coords, results = ppk(
@@ -868,7 +868,6 @@ class ProcessingDir(LoadDir):
             sbs_file=self.data.drone_rnx_sbs,
             sp3_file=self.data.sp3 if use_precise else None,
             clk_file=self.data.clk,
-            inx_file=self.data.inx,
             atx_file=atx,
             receiver_file=receiver,
             precise=use_precise,

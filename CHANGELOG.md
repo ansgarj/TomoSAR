@@ -12,9 +12,11 @@ All notable changes to this project will be documented in this file.
 - `rdtomo` functions should now use the `rdtomo.coords.Pos` class in most cases, except for internal calculations before initiating a `Pos` object (**exception**: `rdtomo.trackfinding` which requires a more thorough walkthrough)
 - Changed the name of `rdtomo.gnss.rtkp` to `rdtomo.gnss.ppk` to better match reality
 - `rdtomo.ppk` and `rdtomo.ppp` now return a tuple with the `Pos` object as the first entry and a dict with the rest of the results as the second
+- Removed `.INX` files from `rdtomo.gnss.ppk` since they are only used for PPP mode
 
 ### Fixed
 - Fixed bug in `rdtomo.data.DataDir.open()` that had been introduced somehow that caused it to close the temporary container prematurely
+- `rdtomo.gnss.ppk` now correctly suppresses all file output when no output file is specified (inluding `.stat` and `_events.pos` files)
 
 ## [0.1.0] - 2025-11-28
 

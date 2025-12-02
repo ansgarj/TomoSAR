@@ -257,11 +257,6 @@ def ppk_frames(
         elevation_mask = elevation_mask,
         minimal_overlap = minimal_overlap,
     ) as data:
-        if use_swepos and not elevation_mask:
-            if not use_broadcast:
-                elevation_mask = 15 # Precise 
-            else:
-                elevation_mask = 5
         print(f"Path {path} is {type(path)}")
         print(f"Data container {data.container} exists: {data.container.exists()} and is {'dir' if data.container.is_dir() else 'file'}")
         coords_uni, results_uni = run_ppk(
@@ -282,7 +277,6 @@ def ppk_frames(
             mocoref_file=data.mocoref,
             retain=True
         )
-        print()
         coords_div, results_div = run_ppk(
             rover_obs=data.drone_rnx_obs,
             base_obs=data.base_obs,
@@ -322,8 +316,11 @@ def ppk_frames(
     ax.legend()
     
     ax = axs[1]
-    ax.plot(gpst, (coords_div - coords_uni).norm(), label="Distance (m)")
-    ax.set_ylabel("Coordinate difference (m)")
+    diff = coords_div - coords_uni 
+    ax.plot(gpst, diff.norm(horizontal=True), label="Horizontal")
+    ax.plot(gpst, diff.norm(vertical=True), label="Vertical")
+    ax.set_ylabel("Distance (m)")
+    ax.legend()
 
     ax = axs[2]
     ax.plot(gpst, results_uni["ratio"], 'g-', label="Unified")

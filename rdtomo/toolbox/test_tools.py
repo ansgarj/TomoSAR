@@ -47,7 +47,6 @@ def gnss(savar) -> None:
         base_pos, results = run_ppp(swepos_obs, swepos_nav, header=False, out_path=swepos_obs.with_suffix(".out"), retain=True, force_splice=True)
         sp3_file = results["sp3"] 
         clk_file = results["clk"]
-        inx_file = results["inx"]
     
         diff: DeltaPos = base_pos - results["header_position"]
         if diff.norm() < 0.01:
@@ -67,7 +66,6 @@ def gnss(savar) -> None:
             out_path=out_path,
             sp3_file=sp3_file,
             clk_file=clk_file,
-            inx_file=inx_file,
             precise=True
         )
         q = result["quality"]
@@ -80,7 +78,7 @@ def gnss(savar) -> None:
             raise RuntimeError("rnx2rtkp failed to produce a .pos file with valid content")
 
         if quality_conversion > 99 and dur == timedelta(minutes=10, seconds=1.6):
-            print("TEST: PPK processing sucessful")
+            print("TEST: PPK sucessful")
             print()
             print("GNSS processing OPERATIONAL!")
         else:
@@ -250,7 +248,6 @@ def precise_ppk(
             sbs_file=data.drone_rnx_sbs,
             sp3_file=data.sp3,
             clk_file=data.clk,
-            inx_file=data.inx,
             atx_file=atx,
             receiver_file=receiver,
             precise=True,
@@ -261,8 +258,6 @@ def precise_ppk(
             mocoref_file=data.mocoref,
             retain=False
         )
-
-        print()
         if use_swepos and not elevation_mask:
             elevation_mask = 5 # Broadcast
         coords_bc, results_bc = run_ppk(
@@ -272,7 +267,6 @@ def precise_ppk(
             sbs_file=data.drone_rnx_sbs,
             sp3_file=data.sp3,
             clk_file=data.clk,
-            inx_file=data.inx,
             atx_file=atx,
             receiver_file=receiver,
             precise=False,
@@ -295,7 +289,6 @@ def precise_ppk(
     fig, axs = plt.subplots(3, 1, squeeze=False, figsize=(12, 12), sharex=True, tight_layout=True)
     axs = axs.flatten()
     ax = axs[0]
-    #ax.plot(gpst, coords_precise[:,2], 'g-', label=f"Precise")
     ax.plot(gpst, coords_prec.h, 'g-', label=f"Precise track")
     ax.plot(gpst, coords_bc.h, 'b:', label=f"Broadcast track")
     ax.plot(gpst[precise_only], coords_prec.h[precise_only], 'r+', label=f"Precise only float")
@@ -307,8 +300,10 @@ def precise_ppk(
 
     ax = axs[1]
     diff = coords_bc - coords_prec
-    ax.plot(gpst, diff.norm(), label="Distance (m)")
-    ax.set_ylabel("Coordinate difference (m)")
+    ax.plot(gpst, diff.norm(horizontal=True), label="Horizontal")
+    ax.plot(gpst, diff.norm(vertical=True), label="Vertical")
+    ax.set_ylabel("Distance (m)")
+    ax.legend()
 
     ax = axs[2]
     ax.plot(gpst, results_prec["ratio"], 'g-', label="Precise")
@@ -404,7 +399,6 @@ def ppk(
             sbs_file=data.drone_rnx_sbs,
             sp3_file=data.sp3,
             clk_file=data.clk,
-            inx_file=data.inx,
             atx_file=atx,
             receiver_file=receiver,
             precise=not use_broadcast,
@@ -415,7 +409,6 @@ def ppk(
             mocoref_file=data.mocoref,
             retain=False
         )
-        print()
         coords_raw, results_raw = run_ppk(
             rover_obs=data.drone_rnx_obs,
             base_obs=data.base_obs,
@@ -423,7 +416,6 @@ def ppk(
             sbs_file=data.drone_rnx_sbs,
             sp3_file=data.sp3,
             clk_file=data.clk,
-            inx_file=data.inx,
             precise=False,
             out_path=None,
             download_dir=data.container,
@@ -444,7 +436,6 @@ def ppk(
     fig, axs = plt.subplots(3, 1, squeeze=False, figsize=(12, 12), sharex=True, tight_layout=True)
     axs = axs.flatten()
     ax = axs[0]
-    #ax.plot(gpst, coords_precise[:,2], 'g-', label=f"Precise")
     ax.plot(gpst, coords_int.h, 'g-', label="Internal track")
     ax.plot(gpst, coords_raw.h, 'b:', label="Raw track")
     ax.plot(gpst[int_only], coords_int.h[int_only], 'r+', label=f"Internal only float")
@@ -456,8 +447,10 @@ def ppk(
     
     ax = axs[1]
     diff = coords_raw - coords_int 
-    ax.plot(gpst, diff.norm(), label="Distance (m)")
-    ax.set_ylabel("Coordinate difference (m)")
+    ax.plot(gpst, diff.norm(horizontal=True), label="Horizontal")
+    ax.plot(gpst, diff.norm(vertical=True), label="Vertical")
+    ax.set_ylabel("Distance (m)")
+    ax.legend()
 
     ax = axs[2]
     ax.plot(gpst, results_int["ratio"], 'g-', label="Internal")

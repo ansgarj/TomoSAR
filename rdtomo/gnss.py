@@ -479,6 +479,7 @@ def rnx2rtkp(
     with resource(base_obs) as tmp_obs:
         if antenna_type:
             update_antenna(tmp_obs, antenna=antenna_type, radome=radome)
+        # cmd.extend(['-x', '3']) # Used for debugging
         cmd.extend([rover_obs, tmp_obs, nav_file])
         if sbs_file:
             cmd.append(sbs_file)
@@ -487,6 +488,9 @@ def rnx2rtkp(
         if clk_file:
             cmd.append(clk_file)
         result = run(cmd, capture=capture)
+        if capture:
+            (Path.cwd() / '.stat').unlink()
+            (Path.cwd() / '_events.pos').unlink()
         return result.stdout
 
 def glab_ppp(
@@ -740,7 +744,8 @@ def splice_sp3(eph_files: list[Path], force: bool = False, output_dir: Path|str|
                             out_file.write(f"/* Spliced by TomoSAR v{version[:5]} from {len(eph_files)} files\n")
                     out_file.write(line)
         out_file.write("EOF\n")
-    print("done.")
+    if len(eph_files) != 1:
+        print("done.")
 
     return merged_file
 
@@ -781,7 +786,8 @@ def splice_clk(clk_files: list[Path], output_dir: Path, force: bool = False) -> 
                     if i != 0 and not end_of_header:
                         continue # Skip headers for subsequent files
                     out_file.write(line)
-    print("done.")
+    if len(clk_files) != 1:
+        print("done.")
     
     return merged_file
 
@@ -831,7 +837,8 @@ def splice_dcb(dcb_files: list[Path], output_dir: Path, force: bool = False) -> 
                     out_file.write(line)
         out_file.write("-BIAS/SOLUTION\n")
         out_file.write("%=ENDBIA\n")
-    print("done.")
+    if len(dcb_files) != 1:    
+        print("done.")
     
     return merged_file
 
@@ -900,7 +907,8 @@ def splice_inx(inx_files: list[Path], output_dir: Path, force: bool = False) -> 
         out_file.writelines(tec_lines)
         out_file.writelines(rms_lines)
         out_file.write(f"{' '*60}END OF FILE\n")
-    print("done.")
+    if len(inx_files) != 1:
+        print("done.")
     
     return merged_file
 
@@ -997,7 +1005,7 @@ def fetch_cod_files(
                 files = ftp.nlst()
 
                 # Find COD INX file
-                target_name = f"COD0OPSRAP_{current.year}{doy}0000_01D_01H_GIM.INX.gz"
+                target_name = f"ESA0OPSFIN_{current.year}{doy}0000_01D_02H_GIM.INX.gz"
                 match = next((f for f in files if f == target_name), None)
                 
                 if match:
@@ -1571,7 +1579,7 @@ def detect_convergence_and_mean(x_vals, y_vals, z_vals, x_err, y_err, z_err, err
 # Function to read mocoref data from a data file
 def generate_mocoref(
         data: Pos|str|Path|dict|pd.DataFrame,
-        timestamp: datetime|float|str,
+        timestamp: datetime|float|str|None = None,
         type: str = None,
         output_dir: Path|str|None = None,
         line: int = 1,
@@ -1602,14 +1610,25 @@ def generate_mocoref(
     Returns:
     - pos: Pos object with the mocoref position
     - mocoref_path: path to generated file or None"""
+    settings = Settings()
 
     # Check if Pos object was passed
     data_file = None
     if isinstance(data, Pos):
         mocoref_pos = data
-    
+        mocoref_antenna = 0.
+        mocoref_latitude = mocoref_pos.lat[0]
+        mocoref_longitude = mocoref_pos.lon[0]
+        mocoref_height = mocoref_pos.h[0]
+
+        if output_dir:
+            output_dir = Path(output_dir)
+        else:
+            output_dir = Path.cwd()
     # Read position from aux data
     else:
+        if not timestamp:
+            raise ValueError("For non-Pos the timestamp parameter must be specified")
         if isinstance(data, dict):
             type = "JSON"
         elif isinstance(data, pd.DataFrame):
@@ -1648,7 +1667,6 @@ def generate_mocoref(
             raise TypeError(f"Invalid type {type}. Valid types: {valid_types}")
         
         # Get mocoref data 
-        settings = Settings()
         match type:
             case "csv":
                 # Read data from file
@@ -1911,7 +1929,6 @@ def ppk(
         sp3_file: str|Path|None = None,
         precise: bool = False,
         clk_file: str|Path|None = None,
-        inx_file: str|Path|None = None,
         atx_file: str|Path|None = None,
         receiver_file: str|Path|None = None,
         elevation_mask: float|None = None,
@@ -1994,13 +2011,6 @@ def ppk(
         else:
             warn(f"User provided CLK file {clk_file} not found, ignoring")
             clk_file = None
-    if inx_file:
-        inx_file = Path(inx_file)
-        if inx_file.is_file():
-            eph_files.add("INX")
-        else:
-            warn(f"User provided IONEX file {inx_file} not found, ignoring")
-            inx_file = None
 
     if out_path:
         out_path = Path(out_path)
@@ -2015,6 +2025,7 @@ def ppk(
     if download_dir:
         output_dir = Path(download_dir)
 
+    print(f"Running {'raw ' if raw else ''}PPK {'in precise mode ' if precise else 'with broadcast data '}...\n   Rover: {local(rover_obs)}\n   Base: {local(base_obs)}\n   Nav: {local(nav_file)}\n{f'   SP3: {local(sp3_file)}\n' if sp3_file else ''}{f'   CLK: {local(clk_file)}\n' if clk_file else ''}{f'-->Out: {local(out_path)}' if out_path else ''}", end="", flush=True)
     antenna_type, radome = _ant_type(base_obs)
     if not raw:    
         print(f"Detected base antenna type: {antenna_type} {radome}")
@@ -2040,7 +2051,6 @@ def ppk(
                 else:
                     warn("No callibration data available. Using all available constellations and frequencies.")
     
-    print(f"Running {'raw ' if raw else ''}PPK {'in precise mode ' if precise else 'with broadcast data '}...\n   Rover: {local(rover_obs)}\n   Base: {local(base_obs)}\n   Nav: {local(nav_file)}\n{f'   SP3: {local(sp3_file)}\n' if sp3_file else ''}{f'   CLK: {local(clk_file)}\n' if clk_file else ''}{f'   INX: {local(inx_file)}\n' if inx_file else ''}{f'-->Out: {local(out_path)}' if out_path else ''}", flush=True)
     with resource(config_file, "PPK_CONFIG", antenna=antenna_type, radome=radome, satellites=atx_file, receiver_file=receiver_file) as config:
         with tmp(output_dir / "tmp", allow_dir=True) as tmp_dir:
             if raw:
@@ -2049,20 +2059,19 @@ def ppk(
                 freqs = ""
             if sp3_file or precise:
                 # Modify to precise pos1-eph mode
-                if not eph_files == {"SP3", "CLK", "INX"}:
+                if not eph_files == {"SP3", "CLK"}:
+                    eph_files.add("INX")
                     start_utc, end_utc, _, _ = extract_rnx_info(base_obs)
                     downloaded_files, failed = fetch_cod_files(start_time=start_utc, end_time=end_utc, output_dir=tmp_dir, ignore_files=eph_files, max_workers=max_downloads, max_retries=max_retries, dry=dry)
                     if failed:
                         warn(f"Failed to download {failed} files from GSSC lake (see above).")
                     
-                    merged_sp3_file, merged_clk_file, merged_inx_file = merge_ephemeris(downloaded_files, output_dir=output_dir if retain else tmp_dir, force=force_splice)
+                    merged_sp3_file, merged_clk_file, _ = merge_ephemeris(downloaded_files, output_dir=output_dir if retain else tmp_dir, force=force_splice)
                     if not sp3_file:
                         sp3_file = merged_sp3_file
                     if not clk_file:
                         clk_file = merged_clk_file
-                    if not inx_file:
-                        inx_file = merged_inx_file
-                modify_config(config, precise=True, ionofile=inx_file)
+                modify_config(config, precise=True)
             if dry:
                 return
             try:
@@ -2119,10 +2128,10 @@ def ppk(
     pos, results = read_rnx2rtkp_out(out)
     quality_conversion = np.sum(results["quality"] == 1) / len(results["quality"]) * 100
     print(f"Quality conversion: Q1 = {quality_conversion:.2f} %")
+    print()
 
-    results["sp3"] = sp3_file if sp3_file.is_file() else None
-    results["clk"] = clk_file if clk_file.is_file() else None
-    results["inx"] = inx_file if inx_file.is_file() else None
+    results["sp3"] = sp3_file if sp3_file and sp3_file.is_file() else None
+    results["clk"] = clk_file if clk_file and clk_file.is_file() else None
 
     return pos, results
    
@@ -2256,9 +2265,9 @@ def station_ppp(
     # Extract position
     pos, results = read_glab_out(out, verbose=True)
     results["header_position"] = approx_pos
-    results["sp3"] = sp3_file if sp3_file.is_file() else None
-    results["clk"] = clk_file if clk_file.is_file() else None
-    results["inx"] = inx_file if inx_file.is_file() else None
+    results["sp3"] = sp3_file if sp3_file and sp3_file.is_file() else None
+    results["clk"] = clk_file if clk_file and clk_file.is_file() else None
+    results["inx"] = inx_file if inx_file and inx_file.is_file() else None
 
     if header:
         # Compare against header
@@ -2267,7 +2276,7 @@ def station_ppp(
         print(f"Header position shifted: {distance:.3} m (E: {diff[0]:.3} m, N: {diff[1]:.3} m, U: {diff[2]:.3} m)")
         update_rinex_position(obs_path, results["position"])
         
-    _, results["mocoref_file"] = generate_mocoref(pos, timestamp=results['epoch'], generate=make_mocoref)
+    _, results["mocoref_file"] = generate_mocoref(pos, generate=make_mocoref)
 
     return pos, results
     
