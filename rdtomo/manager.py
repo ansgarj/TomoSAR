@@ -6,6 +6,7 @@ import re
 import shutil
 import json
 import subprocess
+import stat
 
 from .config import Settings, LOCAL
 from .utils import warn, local, changed
@@ -55,7 +56,7 @@ def check_required_binaries() -> None:
     else:
         print("All required binaries are available.")
  
-# Catch-all run command for binariy executables
+# Catch-all run command for binary executables
 def run(cmd: str | list, capture: bool = True) -> subprocess.CompletedProcess:
     
     if not isinstance(cmd, list):
@@ -71,6 +72,38 @@ def run(cmd: str | list, capture: bool = True) -> subprocess.CompletedProcess:
     except subprocess.CalledProcessError as e:
         raise RuntimeError(
             f"Command failed with exit code {e.returncode}.\n"
+            f"stdout:\n{e.stdout}\n"
+            f"stderr:\n{e.stderr}"
+        ) from e
+
+# GDL specific run command
+def gdl(gdl_cmd: str|list, capture: bool = False, mult: bool = False) -> subprocess.CompletedProcess:
+    """Runs GDL command with -q and -e flags. Multiple GDL commands can be chained
+    in a list by setting mult to True, but if mult is set to False each list element
+    is instead treated as a new argument to the initial command call.
+    
+    Note that it is always possible to pass the entire command as a single string."""
+    
+    # Require GDL
+    require_binary("gdl")
+    cmd = ["gdl", "-q", "-e"]
+
+    # Convert GDL command to single string
+    if isinstance(gdl_cmd, list):
+        if mult:
+            gdl_cmd = " & ".join(gdl_cmd)
+        else:
+            gdl_cmd = ",".join(gdl_cmd)
+
+    cmd.append(gdl_cmd)
+    if Settings().VERBOSE:
+            print(' '.join(cmd))
+    try:
+        result = subprocess.run(cmd, capture_output=capture, text=True, check=True)
+        return result
+    except subprocess.CalledProcessError as e:
+        raise RuntimeError(
+            f"GDL failed with exit code {e.returncode}.\n"
             f"stdout:\n{e.stdout}\n"
             f"stderr:\n{e.stderr}"
         ) from e
@@ -277,7 +310,7 @@ def tmp(*args, temporary: bool = True, allow_dir: bool = False) -> Iterator[Path
             unlink(paths)
 
 # VRT
-def build_vrt(vrt_path: Path|str, paths: list[Path|str]) -> Path:
+def build_vrt(vrt_path: Path|str, paths: list[str]) -> Path:
     """
     Build a .vrt mosaic from all .tif files, returning the file path if a single GeoTIFF file is passed
     """
@@ -385,8 +418,6 @@ def modify_config(
         file.writelines(lines)
 
 # Manage read only states
-import stat
-
 def read_only(path: Path|str) -> Path:
     path = Path(path)
     for p in path.rglob('*'):

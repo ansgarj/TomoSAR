@@ -7,7 +7,7 @@ from matplotlib import pyplot as plt
 
 from ..gnss import fetch_swepos, station_ppp as run_ppp, ppk as run_ppk, ubx2rnx
 from ..manager import resource
-from ..coords import DeltaPos
+from ..position import DeltaPos
 from ..config import LOCAL, Settings
 from ..data import DataDir
 
@@ -18,7 +18,7 @@ def test() -> None:
 
 @test.command()
 @click.option("--savar", is_flag=True, help="Process Savar test file instead of default (SVB)")
-def gnss(savar) -> None:
+def gnss(savar: bool = False) -> None:
     """Test GNSS processing capabilities."""
     test_dir = LOCAL / "gnss_test"
     test_dir.mkdir(parents=True, exist_ok=True)
@@ -85,7 +85,7 @@ def gnss(savar) -> None:
             raise RuntimeError("rnx2rtkp produced poor Q1 quality or lost time, check tomosar settings PPK_CONFIG")
         
 @test.command()
-@click.argument("path", type=click.Path(exists=True, file_okay=False, path_type=DataDir), default=DataDir.cwd())
+@click.argument("path", type=click.Path(exists=True, file_okay=False, path_type=DataDir), default=None)
 @click.option("--swepos", "use_swepos", is_flag=True, help="Substitute for base OBS with files from nearest Swepos station")
 @click.option("-z", "-zip", "is_zip", is_flag=True, help="Force base OBS and mocoref.moco files to be generated from a Reach ZIP archive")
 @click.option("--mocoref", "is_mocoref", is_flag=True, help="Force mocoref data to be read from mocoref.moco file")
@@ -105,7 +105,7 @@ def gnss(savar) -> None:
 @click.option("--offset", type=float, default=-0.079, help="Specify vertical PCO between mocoref data log receiver and drone processing receiver (default=-0.079) for CSV files")
 @click.option("--overlap", "minimal_overlap", type=float, default=10, help="Specify minimal overlap between base OBS and drone flight in minutes (default: 10 minutes)")
 def station_ppp(
-    path: DataDir,
+    path: DataDir|None,
     use_swepos: bool,
     is_zip: bool,
     is_mocoref: bool,
@@ -127,6 +127,8 @@ def station_ppp(
 ) -> None:
     """Test station PPP against ground truth as found in a mocoref file. This test opens a Data Directory to extract data and runs
     station PPP on the base OBS, and compares it against the mocoref position."""
+    if not path:
+        path = DataDir.cwd()
 
     with path.open(
         atx = atx,
@@ -170,7 +172,7 @@ def station_ppp(
     print(f"Distance: {distance:.2f} m (E: {diff[0]:.2f} m, N: {diff[1]:.2f} m, U: {diff[2]:.2f} m)")
 
 @test.command()
-@click.argument("path", type=click.Path(exists=True, file_okay=False, path_type=DataDir), default=DataDir.cwd())
+@click.argument("path", type=click.Path(exists=True, file_okay=False, path_type=DataDir), default=None)
 @click.option("--swepos", "use_swepos", is_flag=True, help="Substitute for base OBS with files from nearest Swepos station")
 @click.option("--ppp", "use_ppp", is_flag=True, help="Subsitute for mocoref data by running static PPP on base OBS")
 @click.option("-z", "-zip", "is_zip", is_flag=True, help="Force base OBS and mocoref.moco files to be generated from a Reach ZIP archive")
@@ -192,7 +194,7 @@ def station_ppp(
 @click.option("--overlap", "minimal_overlap", type=float, default=10, help="Specify minimal overlap between base OBS and drone flight in minutes (default: 10 minutes)")
 @click.option("-k", "--config", type=click.Path(exists=True, path_type=Path), default=None, help="Specify external config file for rnx2rtkp")
 def precise_ppk(
-    path: DataDir,
+    path: DataDir|None,
     use_swepos: bool,
     use_ppp: bool,
     is_zip: bool,
@@ -216,6 +218,9 @@ def precise_ppk(
 ) -> None:
     """Compare solutions from precise and broadcast ephemeris data in PPK post processing. This test opens a Data Directory and runs PPK
     post processing on the drone once with precise mode and once with broadcast ephemeris data."""
+
+    if not path:
+        path = DataDir.cwd()
 
     with path.open(
         require_drone=True,
@@ -241,60 +246,36 @@ def precise_ppk(
     ) as data:
         if use_swepos and not elevation_mask:
             elevation_mask = 20 # Precise 
-        coords_prec, results_prec = run_ppk(
-            rover_obs=data.drone_rnx_obs,
-            base_obs=data.base_obs,
-            nav_file=data.drone_rnx_nav,
-            sbs_file=data.drone_rnx_sbs,
-            sp3_file=data.sp3,
-            clk_file=data.clk,
-            atx_file=atx,
-            receiver_file=receiver,
-            precise=True,
-            out_path=None,
-            download_dir=data.container,
-            config_file=config,
+        coords_prec, results_prec = data.ppk(
+            atx=atx,
+            receiver=receiver,
+            use_precise=True,
+            config=config,
             elevation_mask=elevation_mask,
-            mocoref_file=data.mocoref,
-            retain=False
         )
         if use_swepos and not elevation_mask:
             elevation_mask = 5 # Broadcast
-        coords_bc, results_bc = run_ppk(
-            rover_obs=data.drone_rnx_obs,
-            base_obs=data.base_obs,
-            nav_file=data.drone_rnx_nav,
-            sbs_file=data.drone_rnx_sbs,
-            sp3_file=data.sp3,
-            clk_file=data.clk,
-            atx_file=atx,
-            receiver_file=receiver,
-            precise=False,
-            out_path=None,
-            download_dir=data.container,
-            config_file=config,
+        coords_bc, results_bc = data.ppk(
+            atx=atx,
+            receiver=receiver,
+            use_precise=False,
+            config=config,
             elevation_mask=elevation_mask,
-            mocoref_file=data.mocoref,
-            retain=False
         )
 
     gpst, q_prec = results_prec["gpst"], results_prec["quality"]
     q_bc = results_bc["quality"]
 
-    # Index tracking
-    precise_only = (q_prec != 1) & (q_bc == 1)
-    bc_only = (q_bc != 1) & (q_prec == 1)
-    both = (q_prec != 1) & (q_bc != 1)
+    float_prec = ~(q_prec == 1)
+    float_bc = ~(q_bc == 1)
     
     fig, axs = plt.subplots(3, 1, squeeze=False, figsize=(12, 12), sharex=True, tight_layout=True)
     axs = axs.flatten()
     ax = axs[0]
     ax.plot(gpst, coords_prec.h, 'g-', label=f"Precise track")
     ax.plot(gpst, coords_bc.h, 'b:', label=f"Broadcast track")
-    ax.plot(gpst[precise_only], coords_prec.h[precise_only], 'r+', label=f"Precise only float")
-    ax.plot(gpst[bc_only], coords_bc.h[bc_only], 'm+', label=f"Broadcast only float")
-    ax.plot(gpst[both], coords_prec.h[both], 'y+', label="Both float (precise)")
-    ax.plot(gpst[both], coords_bc.h[both], 'c+', label="Both float (broadcast)")
+    ax.plot(gpst[float_prec], coords_prec.h[float_prec], 'g+', label=f"Precise float")
+    ax.plot(gpst[float_bc], coords_bc.h[float_bc], 'b+', label=f"Broadcast float")
     ax.set_ylabel("Ellipsoidal Height (m)")
     ax.legend()
 
@@ -306,8 +287,8 @@ def precise_ppk(
     ax.legend()
 
     ax = axs[2]
-    ax.plot(gpst, results_prec["ratio"], 'g-', label="Precise")
-    ax.plot(gpst, results_bc["ratio"], 'r-', label="Broadcast")
+    ax.plot(gpst, results_prec["ratio"], 'r-', label="Precise")
+    ax.plot(gpst, results_bc["ratio"], 'b-', label="Broadcast")
     ax.set_ylabel("AR Ratio")
     ax.legend()
 
@@ -316,7 +297,7 @@ def precise_ppk(
     plt.show()
 
 @test.command()
-@click.argument("path", type=click.Path(exists=True, file_okay=False, path_type=DataDir), default=DataDir.cwd())
+@click.argument("path", type=click.Path(exists=True, file_okay=False, path_type=DataDir), default=None)
 @click.option("--swepos", "use_swepos", is_flag=True, help="Substitute for base OBS with files from nearest Swepos station")
 @click.option("--ppp", "use_ppp", is_flag=True, help="Subsitute for mocoref data by running static PPP on base OBS")
 @click.option("-z", "-zip", "is_zip", is_flag=True, help="Force base OBS and mocoref.moco files to be generated from a Reach ZIP archive")
@@ -339,7 +320,7 @@ def precise_ppk(
 @click.option("--overlap", "minimal_overlap", type=float, default=10, help="Specify minimal overlap between base OBS and drone flight in minutes (default: 10 minutes)")
 @click.option("-k", "--config", type=click.Path(exists=True, path_type=Path), default=None, help="Specify external config file for rnx2rtkp")
 def ppk(
-    path: DataDir,
+    path: DataDir|None,
     use_swepos: bool,
     use_ppp: bool,
     is_zip: bool,
@@ -364,6 +345,9 @@ def ppk(
 ) -> None:
     """Compare solutions from internal and raw PPK processing. This test opens a Data Directory and runs PPK processing
     on the drone once with the internal resources, and once raw (including no files downloaded)."""
+
+    if not path:
+        path = DataDir.cwd()
 
     with path.open(
         require_drone=True,
@@ -392,36 +376,17 @@ def ppk(
                 elevation_mask = 20 # Precise 
             else:
                 elevation_mask = 5
-        coords_int, results_int = run_ppk(
-            rover_obs=data.drone_rnx_obs,
-            base_obs=data.base_obs,
-            nav_file=data.drone_rnx_nav,
-            sbs_file=data.drone_rnx_sbs,
-            sp3_file=data.sp3,
-            clk_file=data.clk,
-            atx_file=atx,
-            receiver_file=receiver,
-            precise=not use_broadcast,
-            out_path=None,
-            download_dir=data.container,
-            config_file=config,
+        coords_int, results_int = data.ppk(
+            atx=atx,
+            receiver=receiver,
+            use_precise=not use_broadcast,
+            config=config,
             elevation_mask=elevation_mask,
-            mocoref_file=data.mocoref,
-            retain=False
         )
-        coords_raw, results_raw = run_ppk(
-            rover_obs=data.drone_rnx_obs,
-            base_obs=data.base_obs,
-            nav_file=data.drone_rnx_nav,
-            sbs_file=data.drone_rnx_sbs,
-            sp3_file=data.sp3,
-            clk_file=data.clk,
-            precise=False,
-            out_path=None,
-            download_dir=data.container,
-            config_file=config,
+        coords_raw, results_raw = data.ppk(
+            use_precise=False,
+            config=config,
             elevation_mask=elevation_mask,
-            mocoref_file=data.mocoref,
             raw=True
         )
     

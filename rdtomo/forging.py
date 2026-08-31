@@ -9,7 +9,7 @@ import pandas as pd
 from pathlib import Path
 
 from .utils import warn
-from .core import ImageInfo, SliceInfo, TomoInfo, TomoScene, TomoScenes, regroup
+from .core import ImageInfo, SliceInfo, TomoInfo, TomoScene, TomoScenes
 from .apperture import SARModel
 
 # Configuration constants
@@ -77,12 +77,12 @@ def recursive_search(paths: str|Path|list[str|Path], filter: ImageInfo = None) -
 
     return slice_info, flight_infos, moco_cuts
 
-def find_pairs(band_groups, single=False) -> defaultdict[SliceInfo]:
+def find_pairs(slice_info: SliceInfo, single: bool =False) -> SliceInfo:
     """
     Find pairs of slices in the band groups for interferometric processing.
     Returns a dictionary of new band groups with paired slices.
     """
-    def make_key(slice) -> tuple:
+    def make_key(slice: ImageInfo) -> tuple:
         return tuple(slice.get(k) for k in ImageInfo.PAIR_PARAMETERS)
 
     new_band_groups = defaultdict(SliceInfo)
@@ -91,25 +91,27 @@ def find_pairs(band_groups, single=False) -> defaultdict[SliceInfo]:
     for band1, band0, composite_band in [('phh1', 'phh0', 'phh'), ('cvv1', 'cvv0', 'cvv')]:
         group_map = defaultdict(lambda: {'1': [], '0': []})
 
-        for s in band_groups.get(band1, SliceInfo()):
+        for s in slice_info.groups.get(band1, SliceInfo()):
             group_map[make_key(s)]['1'].append(s)
-        for s in band_groups.get(band0, SliceInfo()):
+        for s in slice_info.groups.get(band0, SliceInfo()):
             group_map[make_key(s)]['0'].append(s)
 
         for group in group_map.values():
             for s1, s0 in zip(group['1'], group['0']):
                 if s1 and s0:
-                    composite_slice = s1.compose(s0)
+                    composite_slice = s1.pair(s0)
                     new_band_groups[composite_band].append(composite_slice)
 
     # Include other bands
-    for band, slices in band_groups.items():
+    for band, slices in slice_info.groups.items():
         if band not in ['phh1', 'phh0', 'cvv1', 'cvv0'] or single:
             new_band_groups[band].extend(slices)
 
-    return new_band_groups
+    slice_info.groups = new_band_groups
 
-def generate_tomograms(band_groups, flight_infos, moco_cuts, 
+    return slice_info
+
+def generate_tomograms(slice_info: SliceInfo, flight_infos, moco_cuts, 
                    sub=False, sup=False, canopy=False, fused=False, npar: int = os.cpu_count(), 
                    RR: bool = True, masks: str = "", tag: str = "") -> TomoScenes:
     """
@@ -118,7 +120,7 @@ def generate_tomograms(band_groups, flight_infos, moco_cuts,
     """
 
     tomo_scenes = []
-    scenes = regroup(band_groups, ['date','spiral'])
+    scenes = slice_info.regroup(['date','spiral'])
     print(f"{len(scenes)} tomographic scene(s) detected.")
     for key, scene in scenes.items():
         tomo_scene = TomoScene()
@@ -233,23 +235,20 @@ def tomoforge(*,paths: str|Path | list[str|Path] = ".", filter: ImageInfo = None
         slice_info = slice_info.unique()
         print(f"of which {len(slice_info)} are unique.")
 
-    # Group slices by band (and antenna)
-    band_groups = slice_info.group('band')
-
     # Print the number of slices per band
-    for band, slices in band_groups.items():
+    for band, slices in slice_info.group('band').items():
         # Print the number of slices
         print(f"\t{len(slices)} slices in {band} band")
     
     # Find pairs of slices unless the nopair flag is set
     if not nopair:
-        band_groups = find_pairs(band_groups, single=single)
+        slice_info = find_pairs(slice_info, single=single)
         print("Forming ...")
-        for band, slices in band_groups.items():
+        for band, slices in slice_info.groups.items():
             print(f"\t{len(slices)} slices in {band} band") if band in ['phh', 'cvv'] else None
 
     # Tomographic processing
-    tomo_scenes = generate_tomograms(band_groups, flight_infos=flight_infos, moco_cuts=moco_cuts, tag=tag,
+    tomo_scenes = generate_tomograms(slice_info, flight_infos=flight_infos, moco_cuts=moco_cuts, tag=tag,
                                  sub=sub, sup=sup, canopy=canopy, fused=fused, npar=npar, RR=RR, masks=masks)
 
     # Save results

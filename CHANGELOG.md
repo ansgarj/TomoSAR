@@ -5,18 +5,29 @@ All notable changes to this project will be documented in this file.
 ## [0.1.1] - Unreleased
 
 ### Added
-- `rdtomo.coords.Pos` class that functions as a simplified interface to manage coordinates and Reference Frames
+- `rdtomo.position` classes `Pos`, `DeltaPos`, `ReferenceFrame` that functions as a simplified interface to manage coordinates and Reference Frames (similar to `datetime` classes `datetime`, `timedelta` and `timezone`, but explicitly handling arrays of coordinates)
+- `rdtomo.trackfinding` module now also implements classes used to store and manipulate flights and tracks: `RawFlight`, `Flight(RawFlight)`, `Track(RawFlight, abc.ABC)`, `Spiral(Track)`, `Linear(Track)` and `Irregular(Track)`.
+- `rdtomo.utils.srf()` for reading Sun Raster Files (SRF)
+- `rdtomo.data.DroneData()` class now has methods for PPK, imuconv and unimoco
 
 ### Changed
-- Renamed `rdtomo.transformers` to `rdtomo.coords`
-- `rdtomo` functions should now use the `rdtomo.coords.Pos` class in most cases, except for internal calculations before initiating a `Pos` object (**exception**: `rdtomo.trackfinding` which requires a more thorough walkthrough)
-- Changed the name of `rdtomo.gnss.rtkp` to `rdtomo.gnss.ppk` to better match reality
-- `rdtomo.ppk` and `rdtomo.ppp` now return a tuple with the `Pos` object as the first entry and a dict with the rest of the results as the second
-- Removed `.INX` files from `rdtomo.gnss.ppk` since they are only used for PPP mode
+- Renamed `rdtomo.transformers` to `rdtomo.position`
+- `rdtomo` functions should now use the `rdtomo.position.Pos` class when returning positions, except for internal calculations before initiating a `Pos` object (where `rdtomo.position.ReferenceFrame` is sufficient), and the `rdtomo.position.DeltaPos` class for e.g. standard deviations, velocities and offsets.
+- Changed the name of `rdtomo.gnss.rtkp()` to `rdtomo.gnss.ppk()` to better match reality
+- `rdtomo.ppk()` and `rdtomo.ppp()` now return a tuple with the `Pos` object as the first entry and a dict with the rest of the results as the second
+- Removed `.INX` files from `rdtomo.ppk()` since they are only used for PPP mode
+- `rdtomo.trackfinding.trackfinder()` now no longer requires DEM: this was a leftover from when it did more advanced modelling, which has since been moved elsewhere to allow basic trackfinding. 
+- `rdtomo.trackfinding` module now uses the local ENU frame consistently (projected coordinates may introduce errors on the centimeter scale across 100m distances due to scale factor variations). 
+- `rdtomo.ppk()` and `rdtomo.gnss.rnx2rtkp()` now allow multiple NAV files as input 
+- Corrected internal configuration so that PPK output is now in ECEF coordinates
+- Whenever `rdtomo.ppk()` produces a `.pos` file, it now also produces a `.<RF>.pos` file, where `<RF>` is the target reference frame from the settings, which contains the position in the target reference frame (this behaviour is situated in `rdtomo.gnss.read_rnx2rtkp_out()` which produces the modified `.<RF>.pos` file whenever it is passed a path instead of just the content).
+- `rdtomo.trackfinder()` now requires paths pointing to the binary `.mocob` file instead of the ASCII variant to speed up loading.
+- Tweaked relative threshold for inliers in `rdtomo.trackfinding.Track.__new__()` when identifying a spiral.
+- `rdtomo.Settings()` is now a singleton object.
 
 ### Fixed
 - Fixed bug in `rdtomo.data.DataDir.open()` that had been introduced somehow that caused it to close the temporary container prematurely
-- `rdtomo.gnss.ppk` now correctly suppresses all file output when no output file is specified (inluding `.stat` and `_events.pos` files)
+- `rdtomo.gnss.ppk()` now correctly suppresses all file output when no output file is specified (inluding `.stat` and `_events.pos` files)
 
 ## [0.1.0] - 2025-11-28
 

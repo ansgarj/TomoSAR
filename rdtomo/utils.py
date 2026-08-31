@@ -1,4 +1,5 @@
 # Imports
+from __future__ import annotations
 import os
 import subprocess
 import shutil
@@ -28,10 +29,102 @@ import code
 import sys
 import inspect
 import hashlib
-from typing import TypeAlias
+from typing import TypeAlias, Sequence
 
 from .tomogram_processing import circularize
- 
+
+IndexType = int | slice | Sequence[int] | Sequence[bool] | np.ndarray
+
+class Angles:
+    __slots__ = ("_degs", "_rads")
+    _degs: npt.NDArray[np.float64]|None     
+    _rads: npt.NDArray[np.float64]|None
+
+    def __init__(self, angles: npt.ArrayLike, degrees: bool = False) -> Angles:
+        """Initiates Angles object. By default the angles are interpreted in radians,
+        but setting degrees to True changes to degrees."""
+        angles = np.asarray(angles, dtype=float)
+        if angles.ndim != 1:
+            raise ValueError("Angles stores only only one-dimensional array-like objects.")
+        if degrees:
+            self._degs = angles
+            self._rads = None
+        else:
+            self._rads = angles
+            self._degs = None
+
+    @property
+    def rads(self) -> npt.NDArray[np.float64]:
+        if self._rads is None:
+            if self._degs is None:
+                raise ValueError("Object initiated with neither degrees nor radians.")
+            self._rads = np.radians(self._degs)
+        return self._rads.copy()
+    
+    @property
+    def degs(self) -> npt.NDArray[np.float64]:
+        if self._degs is None:
+            if self._rads is None:
+                raise ValueError("Object initiated with neither degrees nor radians.")
+            self._degs = np.degrees(self._rads)
+        return self._degs.copy()
+
+    def unwrap(self, degrees: bool = False) -> npt.NDArray[np.float64]:
+        unwrapped = np.unwrap(self.rads)        
+        if degrees:
+            return np.degrees(unwrapped)
+        else:
+            return unwrapped
+        
+    def wrap(self, degrees: bool = False) -> npt.NDArray[np.float64]:
+        if degrees:
+            return self.degs % 360
+        else:
+            return self.rads % (2*np.pi)
+    
+    def __bool__(self) -> bool:
+        return bool(self._degs) or bool(self._rads)
+    
+    def __len__(self) -> int:
+        if self._rads is not None:
+            return len(self._rads)
+        elif self._degs is not None:
+            return len(self._degs)
+        raise ValueError("Object initiated with neither degrees nor radians.")
+    
+    def __getitem__(self, idx: IndexType) -> Angles:
+        """Returns Angles object with a set of coordinates determined by idx."""
+        if self._rads is not None:
+            obj =  Angles(self.rads[idx])
+            if self._degs is not None:
+                obj._degs = self.degs[idx]
+        else:
+            obj = Angles(self.degs[idx], degrees=True)
+        return obj
+
+    def __setitem__(self, idx: IndexType, value: Angles|npt.NDArray[np.floating]):
+        obj = Angles(value)
+        if len(obj) == len(self[idx]):
+            self._coords = obj.coords
+        else:
+            raise ValueError(f"The value must match the idx, and be serializable as a Angles object, not {value}")
+        
+    def copy(self) -> Angles:
+        if self._rads is not None:
+            cp = Angles(self.rads)
+            if self._degs is not None:
+                cp._degs = self.degs
+        else:
+            cp = Angles(self.degs, degrees=True)
+        return cp
+    
+    def join(self, other: Angles|npt.NDArray[np.floating]) -> None:
+        """Serializes the other object as a Angles object and joins it to the current."""
+        if self._rads is not None:
+            self._rads = np.hstack((self._rads, other.rads))
+        if self._degs is not None:
+            self._degs = np.hstack((self._degs, other.degs))
+
 # Warning message
 def warn(message) -> None:
     # Get the current stack
@@ -55,6 +148,64 @@ def warn(message) -> None:
     RESET = "\033[0m"
 
     print(f"{YELLOW}{filename}:{lineno} in {caller_func}(): {message}{RESET}", file=sys.stderr)
+
+# SRF file reader
+def srf(path: str|Path) -> np.ndarray:
+    
+    with open(path, "rb") as f:
+        header = np.fromfile(f, dtype=np.int32, count=8)
+    
+    # Header entries
+    magic_number = header[0]
+    width = header[1]
+    height = header[2]
+    pixel_bits = header[3]
+    byte_length = header[4]
+    data_type = header[5]
+    # cmap = header[6]
+    # cmap_length = header[7]
+
+    # Check magic number
+    if magic_number != 1504078485: # 0x59a66a95
+        raise RuntimeError(f"You attempted to read file {path} as an SRF file, but it returned the wrong magic number: {hex(magic_number)} (expected '0x59a66a95')")
+    
+    # Extract data type
+    match data_type:
+        case 10:
+            bits_per_pix = 16 # IDL data type: int
+            dtype = np.dtype('int16')
+        case 11:
+            bits_per_pix = 32 # IDL data type: long
+            dtype = np.dtype('int32')
+        case 12:
+            bits_per_pix = 64 # IDL data type: long64
+            dtype = np.dtype('int64')
+        case 20:
+            bits_per_pix = 32 # IDL data type: float
+            dtype = np.dtype('float32')
+        case 21:
+            bits_per_pix = 64 # IDL data type: double
+            dtype = np.dtype('float64')
+        case 30:
+            bits_per_pix = 64 # IDL data type: complex
+            dtype = np.dtype('complex64')
+        case 31:
+            bits_per_pix = 128 # IDL data type: dcomplex
+            dtype = np.dtype('complex128')
+        case _:
+            raise RuntimeError(f"SRF file {path} returned invalid raster type ID: {data_type}")
+        
+    # Redundancy
+    if (width * height * bits_per_pix / 8) != byte_length:
+        raise RuntimeError(f"SRF file {path} length did not match format.")
+
+    # Channel count
+    depth = pixel_bits // bits_per_pix
+    if (depth * bits_per_pix) != pixel_bits:
+        raise RuntimeError(f"SRF file {path} pixel bits did not match raster type: {dtype}")
+    
+    # Read array
+    return np.memmap(path, dtype=dtype, mode="r", offset=32, shape=(height, width, depth)).squeeze()
 
 # Localize a path(s) if possible
 def local(paths: list[Path|str]|Path|str, root: Path|str = '.') -> list[str] | str:
@@ -199,6 +350,102 @@ def find_inliers(signal, min_samples: int|float = 0.5, residual_threshold: float
     inlier_mask = binary_closing(inlier_mask, structure=np.ones(3))
 
     return np.where(inlier_mask)[0]
+
+# Interpolate short gaps using polynomial splice
+def close_gaps(positions: np.ndarray,
+                mask: np.ndarray,
+                k: int = 1,
+                degree: int = 1) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Interpolates short gaps (length <= k) using polynomial splicing.
+
+    Parameters
+    ----------
+    positions : np.ndarray
+        Array of shape (N, 3) with e.g. 3D coordinates.
+    mask : np.ndarray
+        Boolean mask of shape (N,) indicating positions to be corrected by interpolation.
+    k : int
+        Maximum gap length to interpolate (default = 1).
+    degree : int
+        Degree of polynomial for splicing (default = 1 for linear).
+
+    Returns
+    -------
+    updated_positions : np.ndarray
+        Positions with short gaps interpolated using polynomial splice.
+    remaining_mask : np.ndarray
+        Boolean mask of positions still unfilled.
+    """
+    updated_positions = positions.copy()
+    N = positions.shape[0]
+    remaining_mask = mask.copy()
+
+    i = 0
+    while i < N:
+        if remaining_mask[i]:
+            start = i
+            while i < N and remaining_mask[i]:
+                i += 1
+            end = i
+            gap_len = end - start
+
+            if gap_len <= k and start > 0 and end < N:
+                # Left side
+                left_idx = []
+                j = 1
+                while j < 6:
+                    if not remaining_mask[start-j]:
+                        left_idx.append(start-j)
+                    else:
+                        break
+                    j += 1
+                
+                # Right side
+                right_idx = []
+                j = 0
+                while j < 5:
+                    if not remaining_mask[end+j]:
+                        right_idx.append(end+j)
+                    else:
+                        break
+                    j += 1
+                
+                # Combine
+                x_known = left_idx.copy()
+                x_known.extend(right_idx)
+                for dim in range(3):
+                    y_known = np.array([updated_positions[x, dim] for x in x_known])
+                    poly_degree = min(degree, len(x_known) - 1)  # fallback to linear if only two points
+                    coeffs = np.polyfit(x_known, y_known, deg=poly_degree)
+                    for j in range(gap_len):
+                        idx = start + j
+                        updated_positions[idx, dim] = np.polyval(coeffs, idx)
+                remaining_mask[start:end] = False
+        else:
+            i += 1
+
+    return updated_positions, remaining_mask
+
+# Slice 1D boolean mask
+def slice_mask(a: np.ndarray):
+    a = np.asarray(a, dtype=bool)
+
+    # Detect transitions
+    d = np.diff(a.astype(np.int8))
+
+    # Start positions (False -> True)
+    starts = np.flatnonzero(d == 1) + 1
+    if a[0]:
+        starts = np.r_[0, starts]
+
+    # End positions (True -> False)
+    ends = np.flatnonzero(d == -1) + 1
+    if a[-1]:
+        ends = np.r_[ends, a.size]
+
+    # Return slices
+    return [slice(s, e) for s, e in zip(starts, ends)]
 
 # Statistics
 def apply_variable_descriptions(df: pd.DataFrame):
@@ -376,36 +623,79 @@ def _estimaterr_slice(I: npt.NDArray, npar: int, X0: float|None, ds=1, tolerance
         X = least_squares(lambda x: noise_fun(x, VAR) - P, X2, bounds=(lower_bound, upper_bound)).x
         return X[0], cFactor
 
-# Helper function to format duration from seconds to 'dd:hh:mm:ss' or 'hh:mm:ss'
-def format_duration(seconds: int|float|timedelta, print_days: bool = False) -> str :
+# Helper function to format duration from seconds to '[d day(s), ]hh:mm:ss[.ffffff]
+def format_duration(seconds: int|float|timedelta, print_days: bool = False, whole_seconds: bool = True) -> str:
     if isinstance(seconds, (int, float)):
         duration = timedelta(seconds=seconds)
-    days = duration.days
-    hours, remainder = divmod(duration.seconds, 3600)
-    minutes, seconds = divmod(remainder, 60)
-    if print_days:
-        return f"{days:02d}:{hours:02d}:{minutes:02d}:{seconds:02d}"
-    else:
-        return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+    if not print_days:
+        duration = duration - timedelta(days=duration.days)
+    if whole_seconds:
+        duration = duration - timedelta(microseconds=duration.microseconds)
+    return str(duration)
 
-# Helper function to convert 'dd:hh:mm:ss' or 'hh:mm:ss' to seconds
-def duration_seconds(duration: str) -> int:
-    match = re.search(r'(\d{2}):(\d{2}):(\d{2})(?::(\d{2}))?', duration)
-    num_matched = sum(1 for g in match.groups() if g is not None)
-    t = 0
-    if num_matched == 3:
-        t += int(match.group(1)) * 3600
-        t += int(match.group(2)) * 60
-        t += int(match.group(3))
-    if num_matched == 4:
-        t += int(match.group(1)) * 3600 * 24
-        t += int(match.group(2)) * 3600
-        t += int(match.group(3)) * 60
-        t += int(match.group(4))
-    return t
+# Helper function to convert '[d days, ]hh:mm:ss[.ffffff]' to seconds
+def parse_duration_string(duration: str) -> float:
+    """
+    Parse a duration string in the format:
+        hh:mm:ss[.ffffff]
+        d day, hh:mm:ss[.ffffff]
+        d days, hh:mm:ss[.ffffff]
+
+    Returns total seconds as float.
+
+    Examples:
+        "00:10:00"            -> 600.0
+        "01:02:03.500000"     -> 3723.5
+        "1 day, 00:00:00"     -> 86400.0
+        "3 days, 12:00:00.25" -> 302400.25
+    """
+
+    # Regex:
+    # - optional days part: one or more digits + whitespace + 'day' or 'days', followed by comma
+    # - then hours:minutes:seconds with optional fractional part
+    # - allow optional leading/trailing spaces
+    pattern = r"""
+        ^\s*
+        (?:                             # Optional days group
+            (?P<days>\d+)\s+
+            (?P<dayword>day|days)\s*,\s+
+        )?
+        (?P<hours>\d{2})
+        :
+        (?P<minutes>\d{2})
+        :
+        (?P<seconds>\d{2}(?:\.\d{1,6})?)
+        \s*$
+    """
+
+    match = re.match(pattern, duration, flags=re.IGNORECASE | re.VERBOSE)
+    if not match:
+        raise ValueError(f"Invalid duration format: {duration!r}")
+
+    days_str = match.group("days")
+    hours_str = match.group("hours")
+    minutes_str = match.group("minutes")
+    seconds_str = match.group("seconds")
+
+    # Convert parts
+    days = int(days_str) if days_str is not None else 0
+    hours = int(hours_str)
+    minutes = int(minutes_str)
+    seconds = float(seconds_str)  # handles optional .ffffff
+
+    # Optional sanity checks (uncomment if you want strict validation)
+    # if hours < 0 or hours > 23:
+    #     raise ValueError("Hours must be in 00–23 when days are specified.")
+    # if minutes < 0 or minutes > 59:
+    #     raise ValueError("Minutes must be in 00–59.")
+    # if not (0.0 <= seconds < 60.0):
+    #     raise ValueError("Seconds must be in 00–59[.ffffff].")
+
+    total_seconds = days * 86400 + hours * 3600 + minutes * 60 + seconds
+    return total_seconds
 
 # Helper function to parse a string to datetime, date or time object
-def parse_datetime_string(s: str) -> datetime|date|time:
+def parse_datetime_string(s: str, require_datetime: bool = False) -> datetime|date|time:
     s = s.strip()
     
     datetime_formats = [
@@ -415,6 +705,7 @@ def parse_datetime_string(s: str) -> datetime|date|time:
         "%d/%m/%Y %H:%M",
         "%Y-%m-%dT%H:%M:%S",
         "%Y-%m-%dT%H:%M",
+        "%Y-%m-%d-%H-%M-%S"
     ]
     
     date_formats = [
@@ -435,19 +726,20 @@ def parse_datetime_string(s: str) -> datetime|date|time:
         except ValueError:
             continue
     
-    for fmt in date_formats:
-        try:
-            return datetime.strptime(s, fmt).date()
-        except ValueError:
-            continue
+    if not require_datetime:
+        for fmt in date_formats:
+            try:
+                return datetime.strptime(s, fmt).date()
+            except ValueError:
+                continue
+        
+        for fmt in time_formats:
+            try:
+                return datetime.strptime(s, fmt).time()
+            except ValueError:
+                continue
     
-    for fmt in time_formats:
-        try:
-            return datetime.strptime(s, fmt).time()
-        except ValueError:
-            continue
-    
-    raise ValueError(f"Could not parse '{s}' as datetime, date, or time.")
+    raise ValueError(f"Could not parse '{s}' as datetime{'' if require_datetime else ', date, or time'}.")
 
 # replace N:th occurence of pattern in a string
 def string_sub(text: str, pattern: str, replacement: str, n: int = 1) -> str:
@@ -773,7 +1065,7 @@ def extract_datetime(filename) -> datetime | None:
 # GPS time manipulation
 datetime_object: TypeAlias = datetime | date | np.datetime64 | npt.NDArray[np.datetime64]
 
-GPS_EPOCH: np.datetime64 = np.datetime64('1980-01-06')
+GPS_EPOCH= np.datetime64('1980-01-06')
 LEAP_SECONDS = np.array([
     np.datetime64('1981-07-01'), np.datetime64('1982-07-01'), np.datetime64('1983-07-01'),
     np.datetime64('1985-07-01'), np.datetime64('1988-01-01'), np.datetime64('1990-01-01'),
@@ -786,7 +1078,7 @@ LEAP_SECONDS = np.array([
 def _to_np_datetime64(obj: object) -> npt.NDArray[np.datetime64]:
     """Convert input to np.datetime64 array."""
     if isinstance(obj, (datetime, date)):
-        return np.array([np.datetime64(obj)])
+        return np.array([np.datetime64(obj.astimezone(timezone.utc).replace(tzinfo=None))])
     elif isinstance(obj, np.datetime64):
         return np.array([obj])
     elif isinstance(obj, (list, tuple, np.ndarray)):
@@ -810,51 +1102,95 @@ def leap_seconds(acquisition_dates: datetime_object) -> int | npt.NDArray[np.int
     result = np.array([(LEAP_SECONDS <= d).sum() for d in dt_array]).astype("timedelta64[s]")
     return result[0] if result.size == 1 else result
 
-def epoch_to_duration(start_year: float, end_year: float) -> timedelta:
-    """
-    Convert the difference between two decimal years into a timedelta object,
-    accounting for leap years.
+def gpst_to_dt(gpst: float|npt.NDArray[np.floating], reference_date: datetime|np.datetime64) -> npt.NDArray[np.datetime64]:
+    """Converts GPST (s) to the corresponding array of np.datetime64 objects."""
 
-    Parameters:
-        start_year (float): Starting epoch in decimal years.
-        end_year (float): Ending epoch in decimal years.
+    gps_median = float(np.median(gpst))
+    gpst = np.asarray(gpst*1E6).astype('timedelta64[us]')
+    reference_date = np.datetime64(reference_date)
 
-    Returns:
-        timedelta: Duration between the two epochs.
-    """
-    # Ensure start_year <= end_year
-    if end_year < start_year:
-        start_year, end_year = end_year, start_year
-
-    print(f"Start: {start_year}\nEnd: {end_year}")
-
-    # Split into integer and fractional parts
-    start_int = int(start_year)
-    end_int = int(end_year)
-
-    # Helper to check leap year
-    def is_leap(year: int) -> bool:
-        return year % 4 == 0 and (year % 100 != 0 or year % 400 == 0)
-
-    total_days = 0.0
-
-    # First partial year
-    if start_int == end_int:
-        # Both in same year
-        days_in_year = 366 if is_leap(start_int) else 365
-        total_days = (end_year - start_year) * days_in_year
+    # Detect format
+    if gps_median > 1e9:
+        # Absolute GPS time
+        naive_time = GPS_EPOCH + gpst
+        fmt = "absolute"
+    elif gps_median < 604800:
+        # Seconds-of-week
+        gps_week = ((reference_date - GPS_EPOCH).astype('timedelta64[D]') // 7)*7
+        gps_week_start = GPS_EPOCH + gps_week
+        naive_time = gps_week_start + gpst
+        fmt = "seconds-of-week"
     else:
-        # Add remaining fraction of start year
-        days_in_start_year = 366 if is_leap(start_int) else 365
-        total_days += (1 - (start_year - start_int)) * days_in_start_year
+        # Check for vendor offset (e.g., minus 1e9)
+        expected_abs = (reference_date - GPS_EPOCH).astype(timedelta).total_seconds()
+        diff = abs(expected_abs - gps_median)
+        if abs(diff - 1e9) < 5e7:  # tolerance ~50 million seconds (~1.5 years)
+            naive_time = GPS_EPOCH + gpst + np.timedelta64(10**6, type='timedelta64[s]')
+            fmt = "offset(+1e9)"
+        else:
+            raise ValueError(f"Unknown GPS time format: median={gps_median}, diff={diff}")
+    
+    # Apply leap second correction
+    return naive_time - np.asarray(leap_seconds(naive_time)).astype('timedelta64[s]')
 
-        # Add full years in between
-        for year in range(start_int + 1, end_int):
-            total_days += 366 if is_leap(year) else 365
+def gps_week_start(dt: datetime) -> datetime:
+    """
+    Return the UTC datetime for Sunday 00:00:00 of the GPS week containing dt.
+    dt may be naive (assumed UTC) or timezone-aware.
+    """
+    # Normalize to UTC
+    if dt.tzinfo is None:
+        dt_utc = dt.replace(tzinfo=timezone.utc)
+    else:
+        dt_utc = dt.astimezone(timezone.utc)
 
-        # Add fraction of end year
-        days_in_end_year = 366 if is_leap(end_int) else 365
-        total_days += (end_year - end_int) * days_in_end_year
+    # Python weekday: Monday=0 ... Sunday=6
+    days_since_sunday = (dt_utc.weekday() + 1) % 7
+    start_date = (dt_utc - timedelta(days=days_since_sunday)).date()
+    utc_start = datetime.combine(start_date, datetime.min.time(), tzinfo=timezone.utc)
 
-    return timedelta(days=total_days)
+    return utc_start + leap_seconds(utc_start)
 
+def decimal_year_to_datetime(year: float) -> datetime:
+    y = datetime(year=int(year), month=1, day=1)
+    next_y = datetime(year=int(year) + 1, month=1, day=1)
+    seconds_in_year = (next_y - y).total_seconds()
+    seconds_passed = seconds_in_year * (year - int(year))
+    return y + timedelta(seconds=seconds_passed)
+
+def gpst(dt: datetime) -> float:
+    """
+    Return the GPST (s) of the datetime object since concurrent GPS week.
+    """
+    start = gps_week_start(dt)
+    
+    # dt in UTC to match start
+    dt_utc = dt.astimezone(timezone.utc) if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+    return (dt_utc - start).total_seconds()
+
+def verify_td64(ti: object) -> np.timedelta64:
+    """Verifies input as np.timedelta64[us]"""
+    if isinstance(ti, timedelta):
+        return np.timedelta64(ti, 'us')
+    elif isinstance(ti, np.timedelta64):
+        return ti.astype('timedelta64[us]')
+    if isinstance(ti, str):
+        return np.timedelta64(timedelta(seconds=parse_duration_string(ti)), 'us')
+    if isinstance(ti, float):
+        return np.timedelta64(timedelta(seconds=ti), 'us')
+    raise ValueError(f"{ti} could not be interpreted as a timedelta")
+            
+def verify_dt64(ti) -> np.datetime64:
+    """Verifies input as np.datetime64"""
+    if isinstance(ti, datetime):
+        if ti.tzinfo:
+            ti = ti.astimezone(timezone.utc).replace(tzinfo=None)
+        return np.datetime64(ti, 'us')
+    elif isinstance(ti, np.datetime64):
+        return ti.astype('datetime64[us]')
+    elif isinstance(ti, str):
+        return np.datetime64(parse_datetime_string(ti), 'us')
+    elif isinstance(ti, float):
+        return np.datetime64(decimal_year_to_datetime(ti), 'us')
+    raise ValueError(f"{ti} could not be interpreted as a datetime")

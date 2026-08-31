@@ -1,5 +1,5 @@
 [build-system]
-requires = ["hatchling","hatch-vcs","wheel"]
+requires = ["hatchling","hatch-vcs","wheel","hatch-cython","cython"]
 build-backend = "hatchling.build"
 
 [project]
@@ -62,3 +62,14 @@ version_scheme = "no-guess-dev"
 
 [tool.hatch.build.hooks.vcs]
 version-file = "rdtomo/version.py"
+
+# [tool.hatch.build.targets.wheel.hooks.cython]
+## This tells the hook where your .pyx files are located. 
+## It works by generating the necessary build instructions for the compiler.
+# include = ["**/*.pyx"] 
+
+## Optional: Set Cython compiler directives (highly recommended for performance)
+# directives = { boundscheck = false, nonecheck = false, language_level = 3 }
+
+## Optional: Add extra compilation arguments
+# compile-args = ["-O3"]

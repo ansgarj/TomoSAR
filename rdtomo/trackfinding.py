@@ -1,393 +1,933 @@
+from __future__ import annotations
 import os
 import pandas as pd
 import numpy as np
+import numpy.typing as npt
 import matplotlib.pyplot as plt
+from matplotlib.axes import Axes
+from matplotlib.figure import Figure
 from multiprocessing import Pool, Manager
 from datetime import datetime, timedelta
-from pyproj import Transformer
 from scipy.optimize import minimize
 from pathlib import Path
-import math
-import re
 from collections import defaultdict, Counter
 import json
 from matplotlib.figure import Figure
+from typing import Type, TypeVar, overload, Iterable
+from abc import ABC, abstractmethod
 
-from .utils import find_inliers, format_duration, add_meta
-from .coords import geo_to_ecef, geo_to_map, ecef_to_enu
-from .dem import elevation
+from .utils import Angles, IndexType, find_inliers, format_duration, add_meta, parse_datetime_string, gpst_to_dt, gpst, srf, slice_mask
+from .position import Pos, DeltaPos
+from .dem import elevation as get_elevation
 from .apperture import SARModel
-from .config import Frequencies
+from .config import Frequencies, Settings
 FREQUENCIES = Frequencies()
 
+FlightType = TypeVar('FlightType', bound='RawFlight')
+
+class RawFlight:
+    __slots__ = ("_pos", "_vel", "_yaw", "_roll", "_pitch")
+    _pos: Pos
+    _vel: DeltaPos
+    _yaw: Angles
+    _roll: Angles
+    _pitch: Angles
+
+    def __new__(cls: Type[FlightType], *args, **kwargs) -> FlightType:
+        return super().__new__(cls)
+
+    @overload
+    def __init__(self, pos: Pos, vel: DeltaPos, yaw: Angles, roll: Angles, pitch: Angles) -> RawFlight:
+        ...
+
+    @overload
+    def __init__(self, flight: RawFlight) -> RawFlight:
+        ...
+
+    def __init__(self, arg1: Pos|RawFlight, vel: DeltaPos = None, yaw: Angles = None, roll: Angles = None, pitch: Angles = None) -> RawFlight:
+        """Initiates a FlightType instance with already defined
+        - position: Pos object
+        - velocity: DeltaPos object
+        - yaw: Angles object
+        - roll: Angles object
+        - pitch: Angles object"""
+
+        # Check if first positional argument is RawFlight (subclass)
+        if isinstance(arg1, RawFlight):
+            pos = arg1.pos
+            vel = arg1.vel
+            yaw = arg1.yaw
+            roll = arg1.roll
+            pitch = arg1.pitch
+        else:
+            # Verify types
+            if isinstance(arg1, Pos):
+                pos = arg1
+            else:
+                raise TypeError(f"The first positional argument must be a RawFlight object or a Pos object, not {type(arg1)}")
+            if not isinstance(vel, DeltaPos):
+                raise TypeError(f"The second positional argument (vel) must be a DeltaPos object, not {type(vel)}")
+            if not isinstance(yaw, Angles):
+                raise TypeError(f"The third positional argument (yaw) must be Angles object, not {type(yaw)}")
+            if not isinstance(roll, Angles):
+                raise TypeError(f"The fourth positional argument (roll) must be Angles object, not {type(yaw)}")
+            if not isinstance(roll, Angles):
+                raise TypeError(f"The fifth positional argument (pitch) must be Angles object, not {type(yaw)}")
+            
+            # Verify compatible sizes
+            if not len(pos) == len(vel):
+                raise ValueError(f"Incompatible sizes: position of length {len(pos)} and velocity of length {len(vel)}")
+            if not len(pos) == len(yaw):
+                raise ValueError(f"Incompatible sizes: position of length {len(pos)} and velocity of length {len(yaw)}")
+            if not len(pos) == len(roll):
+                raise ValueError(f"Incompatible sizes: position of length {len(pos)} and velocity of length {len(roll)}")
+            if not len(pos) == len(pitch):
+                raise ValueError(f"Incompatible sizes: position of length {len(pos)} and velocity of length {len(pitch)}")
+        
+        self._pos = pos.reframe(Settings().TARGET_FRAME)
+        self._vel = vel
+        self._yaw = yaw
+        self._roll = roll
+        self._pitch = pitch
+
+    @classmethod
+    def from_log(cls: Type[FlightType], data: np.ndarray, reference_date: datetime) -> FlightType:
+        """Initiates a FlightType instance from a unimoco log."""
+        # Initiate position
+        dt = gpst_to_dt(data[:,0], reference_date=reference_date)
+        lat = data[:,1]
+        lon = data[:,2]
+        alt = data[:,3]
+        pos = Pos(lon, lat, alt, dt, frame="ITRF", geodetic=True)
+
+        # Initiate velocity
+        vn = data[:,4]
+        ve = data[:,5]
+        vu = data[:,6]
+        vel = DeltaPos(ve, vn, vu)
+
+        # Initiate yaw, roll, pitch
+        roll = Angles(data[:,7], degrees=True)
+        pitch = Angles(data[:,8], degrees=True)
+        yaw = Angles(data[:,9], degrees=True)
+
+        self = cls(pos, vel, yaw, roll, pitch)
+
+        return self
+
+    @property
+    def pos(self) -> Pos:
+        return self._pos.copy()
+    
+    @property
+    def vel(self) -> DeltaPos:
+        return self._vel.copy()
+
+    @property
+    def yaw(self) -> Angles:
+        return self._yaw.copy()
+    
+    @property
+    def roll(self) -> Angles:
+        return self._roll.copy()
+    
+    @property
+    def pitch(self) -> Angles:
+        return self._pitch.copy()
+
+    def __len__(self) -> int:
+        return len(self._pos)
+    
+    def __getitem__(self: FlightType, idx: IndexType) -> FlightType:
+        """Returns FlightType object with a set of coordinates determined by idx."""
+        cls = type(self)
+        return cls(self.pos[idx], self.vel[idx], self.yaw[idx], self.roll[idx], self.pitch[idx])
+
+    def __setitem__(self: FlightType, idx: IndexType, value: FlightType):
+        cls = type(self)
+        obj = cls(value)
+        if len(obj) == len(self[idx]):
+            self._pos[idx] = obj.pos
+            self._vel[idx] = obj.vel
+            self._yaw[idx] = obj.yaw
+            self._roll[idx] = obj.roll
+            self._pitch[idx] = obj.pitch
+        else:
+            raise ValueError(f"The value must match the idx, and be serializable as a FlightType object, not {value}")
+        
+    def astype(self, cls: Type[FlightType], idx: IndexType|None = None) -> FlightType:
+        """Returns a RawFlight instance, or optionally a subset thereof, as another FlightType."""
+        if idx is None:
+            return cls(self.pos, self.vel, self.yaw, self.roll, self.pitch)
+        else:
+            return cls(self.pos[idx], self.vel[idx], self.yaw[idx], self.roll[idx], self.pitch[idx])
+    
+    def timestamps(self) -> tuple[str, str]:
+        return format_duration(gpst(self.pos.dt[0].astype(datetime))), format_duration(gpst(self.pos.dt[-1].astype(datetime)))
+    
+    def save(self, path: str|Path) -> None:
+        data = {
+            "coords": np.hstack((self.pos.geo, self.pos._time.reshape(-1,1)/np.timedelta64(1, 's'))),
+            "epoch": self.pos.epoch,
+            "frame": self.pos.frame.name,
+            "vel": self.vel.coords,
+            "yaw": self.yaw.degs,
+            "roll": self.roll.degs,
+            "pitch": self.roll.degs,
+        }
+        np.savez(path, **data)
+
+    @classmethod
+    def load(cls: Type[FlightType], path: str|Path) -> FlightType:
+        """Loads a FlightType object from a saved .npz file."""
+        with np.load(path, allow_pickle=False) as data:
+            pos = Pos(data['coords'], epoch=data['epoch'], frame=data['frame'], geodetic=True)
+            vel = DeltaPos(data['vel'])
+            yaw = Angles(data['yaw'], degrees=True)
+            roll = Angles(data['roll'], degrees=True)
+            pitch = Angles(data['pitch'], degrees=True)
+        
+        return cls(pos, vel, yaw, roll, pitch)
+    
+    def dur(self) -> np.timedelta64:
+        return self.pos.dt[-1] - self.pos.dt[0]
+    
+    def __str__(self) -> str:
+        return f"RawFlight({len(self.pos)} data points)"
+
+class Flight(RawFlight):
+    __slots__ = ("_track")
+    _track: Track
+
+    @overload
+    def __init__(self, pos: Pos, vel: DeltaPos, yaw: Angles, roll: Angles, pitch: Angles) -> Flight:
+        ...
+
+    @overload
+    def __init__(self, flight: RawFlight) -> Flight:
+        ...
+
+    def __init__(self, arg1: Pos|RawFlight, vel: DeltaPos = None, yaw: Angles = None, roll: Angles = None, pitch: Angles = None) -> Flight:
+        """Initiates a Flight instance with already defined
+        - position: Pos object
+        - velocity: DeltaPos object
+        - yaw: Angles object
+        - roll: Angles object
+        - pitch: Angles object"""
+
+        super().__init__(arg1, vel, yaw, roll, pitch)
+
+        self._track = None
+
+    def copy(self) -> Flight:
+        cp = Flight(self.pos, self.vel, self.yaw, self.roll, self.pitch)
+        if self._track:
+            cp.track = self.track
+   
+    @property
+    def track(self) -> Track:
+        if self._track is None:
+            self._track = Track(self)
+        return self._track
+
+    @property
+    def type(self) -> str:
+        if isinstance(self.track, Spiral):
+            return "Spiral"
+        if isinstance(self.track, Linear):
+            return "Linear"
+        if isinstance(self.track, Irregular):
+            return "Irregular"
+
+    def plot(self, ax: Axes|None = None, flight_id: str|int|None = None) -> tuple[Axes, Figure|None]:
+        """
+        Draw this flight's track on the given Axes. Creates Axes if None.
+        
+        Parameters
+        ----------
+        ax : matplotlib.axes.Axes or None
+            Target axis. If None, a new Figure and Axes are created.
+        label : str or None
+            Label for the line (defaults to flight ID).
+        autoscale : bool
+            Whether to recompute limits after plotting.
+        margins : float or None
+            Fractional padding for autoscale.
+        **line_kw : dict
+            Additional keyword arguments passed to ax.plot().
+        
+        Returns
+        -------
+        ax : matplotlib.axes.Axes
+        fig_created : matplotlib.figure.Figure or None
+            The Figure if created here, else None.
+        """
+        fig_created = None
+        if ax is None:
+            fig_created, ax = plt.subplots()
+
+        # Plot the track
+        ax.plot(self.pos.lon, self.pos.lat, 'r', label="Full flight")
+        ax.plot(self.track.pos.lon, self.track.pos.lat, 'g', label="Track found")
+
+        # Basic labels
+        if flight_id:
+            ax.set_title(f"{f'Flight {flight_id}: {self.type}' if isinstance(flight_id, int) else {flight_id}}")
+        ax.set_xlabel("lon (deg)")
+        ax.set_ylabel("lat (deg)")
+
+        # Trigger redraw in interactive environments
+        ax.figure.canvas.draw_idle()
+
+        return ax, fig_created
+    
+    def __str__(self) -> str:
+        return f"Flight({len(self.pos)} data points)"
+    
+class Track(RawFlight, ABC):
+    _initialized: bool
+
+    @overload
+    def __new__(cls, pos: Pos, vel: DeltaPos, yaw: Angles, roll: Angles, pitch: Angles) -> Track:
+        ...
+
+    @overload
+    def __new__(cls, flight: RawFlight) -> Track:
+        ...
+
+    def __new__(cls, arg1: Pos|RawFlight = None, vel: DeltaPos = None, yaw: Angles = None, roll: Angles = None, pitch: Angles = None) -> Track:
+        if arg1 is None:
+            return super().__new__(cls)
+        if isinstance(arg1, RawFlight):
+            pos = arg1.pos
+            vel = arg1.vel
+            yaw = arg1.yaw
+            roll = arg1.roll
+            pitch = arg1.pitch
+        else:
+            pos = arg1
+
+        if cls is not Track:
+            return super().__new__(cls, pos=pos, vel=vel, yaw=yaw, roll=roll, pitch=pitch)
+         
+        yaw_uw = yaw.unwrap()
+        completed_turns = (np.max(yaw_uw) - np.min(yaw_uw)) / (2*np.pi)
+        dt = np.gradient(pos.t) # Change in seconds
+        time_step = dt.mean()
+
+        # Classify and initiate
+        required_turns = 2
+        if completed_turns > required_turns: # Preliminary: Spiral
+            step = int(10 / time_step)
+            window = np.ones(step) / step
+            tol = 3e-3  # tolerance for second derivative of yaw
+
+            # Step 1: Smooth unwrapped yaw
+            y = np.convolve(yaw_uw, window, mode='full')[:len(yaw_uw)]
+
+            # Step 2: First and second derivatives
+            dy = np.gradient(y) / dt 
+            dy = np.convolve(dy, window, mode='full')[:len(dy)]
+            ddy = np.gradient(dy) / dt
+
+            # Step 3: Find indices with low second derivative
+            idx = np.abs(ddy) < tol
+
+            # Step 4: Split into segments
+            segments = slice_mask(idx)
+            
+            if segments:
+                min_flight_time = 60 # seconds
+                
+                # Step 5: Find longest segment
+                longest = max(segments, key=lambda s: s.stop - s.start)
+                flight_time = (longest.stop - longest.start) * time_step
+                if flight_time >= min_flight_time:
+                    # Step 6: Extract longest segment as preliminary track
+                    ext = 2 * len(window)
+                    start = max(0, longest.start - ext)
+                    end = longest.stop
+                    track = super().__new__(Spiral)
+                    track.__init__(pos[start:end], vel[start:end], yaw[start:end], roll[start:end], pitch[start:end])
+                    track._initialized = True
+
+                    # Step 7: Gradient of azimuth
+                    daz = np.gradient(track.azimuth.unwrap(degrees=True)) / np.gradient(track.pos.t)
+
+                    plt.plot(range(len(daz)), daz, 'r')
+
+                    # Step 8: Find change points in azimuth derivative
+                    inliers = find_inliers(daz, min_samples=0.9, relative_threshold=0.4)
+#                    plt.plot(inliers, daz[inliers], 'gx')
+#                    plt.show()
+
+                    # Step 9: Final track
+                    return track[inliers] 
+
+        # Attempt: Linear
+        tol_const = 1.1
+        min_flight_time = 5  # seconds per track
+
+        # Derivative of heading
+        heading = vel.azimuth.unwrap()
+        dh = np.gradient(heading) / dt
+        idx = np.abs(dh) < tol_const
+
+        # Split into segments
+        segments = slice_mask(idx)
+
+        # Filter short segments
+        segments = [seg for seg in segments if (seg.stop - seg.start) * time_step >= min_flight_time]
+
+        # Remove first segment, corresponding to the drone flight to mission
+        if len(segments) > 2:
+            segments = segments[1:]
+
+        # Find longest segment
+        lengths = [seg.stop - seg.start for seg in segments]
+        if lengths:
+            # Initiate Linear tracks
+            tracks = [super().__new__(Linear) for _ in segments]
+            for track, seg in zip(tracks, segments):
+                track.__init__(pos[seg], vel[seg], yaw[seg], roll[seg], pitch[seg])
+                track._initialized = True
+
+            parallel_tracks = tracks.pop(np.argmax(lengths))
+
+            for track in tracks:
+                if parallel_tracks.is_parallel(track):
+                    parallel_tracks.join(track)
+            
+            return parallel_tracks
+
+        # No Spiral or Linear tracks found
+        track = super().__new__(Irregular)
+        track.__init__(pos, vel, yaw, roll, pitch)
+        track._initialized = True
+
+        return track
+
+    @overload
+    def __init__(self, pos: Pos, vel: DeltaPos, yaw: Angles, roll: Angles, pitch: Angles) -> Track:
+        ...
+
+    @overload
+    def __init__(self, flight: RawFlight) -> Track:
+        ...
+
+    def __init__(self, arg1: Pos|RawFlight, vel: DeltaPos = None, yaw: Angles = None, roll: Angles = None, pitch: Angles = None) -> Track:
+        """Initiates a Track instance with already defined
+        - position: Pos object
+        - velocity: DeltaPos object
+        - yaw: Angles object
+        - roll: Angles object
+        - pitch: Angles object"""
+        if hasattr(self, "_initialized") and self._initialized:
+            return
+        
+        super().__init__(arg1, vel, yaw, roll, pitch)
+        self._initialized = True
+
+    @abstractmethod
+    def info(self, elevation: float|None) -> dict:
+        """Subclasses must provide a method to get rudimentary information in a dict."""
+    
+    def __str__(self) -> str:
+        return f"Track({len(self.pos)} data points)"
+    
+class Spiral(Track):
+    __slots__ = ("_center", "_dif", "_model", "_initialized")
+    _center: Pos
+    _dif: DeltaPos
+    _model: SARModel
+    _initialized: bool
+
+    def __new__(cls, *args, **kwargs) -> Spiral:
+        return super().__new__(cls, *args, **kwargs)
+
+    @overload
+    def __init__(self, pos: Pos, vel: DeltaPos, yaw: Angles, roll: Angles, pitch: Angles) -> Spiral:
+        ...
+
+    @overload
+    def __init__(self, flight: RawFlight) -> Spiral:
+        ...
+
+    def __init__(self, arg1: Pos|RawFlight, vel: DeltaPos = None, yaw: Angles = None, roll: Angles = None, pitch: Angles = None) -> Spiral:
+        """Initiates a Spiral track instance with already defined
+        - position: Pos object
+        - velocity: DeltaPos object
+        - yaw: Angles object
+        - roll: Angles object
+        - pitch: Angles object"""
+        if hasattr(self, '_initialized') and self._initialized:
+            return
+        super().__init__(arg1, vel, yaw, roll, pitch)
+        self._center = None
+        self._dif = None
+        self._model = None
+
+    @property
+    def center(self) -> Pos:
+        if self._center is None:
+            # Initial guess: centroid
+            centroid = self.pos.mean()
+            centroid_delta = self.pos.diff(centroid)
+            
+            # Objective function: deviation from linear radius vs angle
+            def spiral_error(corr_delta: np.ndarray) -> np.floating:
+                new_delta = centroid_delta + corr_delta
+                radius = new_delta.norm(horizontal=True)
+                angle = new_delta.azimuth.unwrap()
+                p = np.polyfit(angle, radius, 1)
+                fit_radius = np.polyval(p, angle)
+                return np.mean((radius - fit_radius)**2)
+
+            result = minimize(spiral_error, np.asarray([0,0,0]), method='Nelder-Mead')
+            self._center = centroid + result.x
+        return self._center.copy()
+    
+    def elevation(self, elevation: float|None = None) -> float:
+        """Corrects the elevation value of the center point. If elevation is
+        specified, this is the value set, otherwise the value is obtained from
+        a DEM."""
+        if elevation is None:
+            elevation = get_elevation(center.lat, center.lon)
+        self._center = self.center.make([self.center.lat[0], self.center.lon[0], elevation], geodetic=True)
+
+    @property
+    def radius(self) -> npt.NDArray[np.float64]:
+        if not self._dif:
+            self._dif = self.pos - self.center
+        return self._dif.norm(horizontal=True)
+    
+    @property
+    def azimuth(self) -> Angles:
+        if not self._dif:
+            self._dif = self.pos - self.center
+        return self._dif.azimuth
+    
+    @property
+    def altitude(self) -> npt.NDArray[np.float64]:
+        if not self._dif:
+            self._dif = self.pos - self.center
+        return self._dif.up
+
+    def info(self, elevation: float|None = None) -> dict:
+        """Returns a dict with basic information about the spiral:
+        - t_start: timestamp for start of track
+        - t_end: timestamp for end of track
+        - center_lat: lat coordinate of center
+        - center_lon: lon coordinate of center
+        - reference_elevation: nominal elevation value of center
+        - min_radius: minimum radius (m)
+        - max_radius: maximum radius (m)
+        - max_altitude: maximum altitude relative reference_elevation (m)
+        - min_altitude: minimum altitude relative reference_elevation (m)
+        
+        If elevation is specified, updates the elevation value of the center."""
+        
+        if elevation:
+            self.elevation(elevation)
+        ts = self.timestamps()
+        info = {
+            "t_start": ts[0],
+            "t_end": ts[1],
+            "center_lat": self.center.lat[0],
+            "center_lon": self.center.lon[0],
+            "reference_elevation": self.center.h[0],
+            "min_radius": round(self.radius.min()),
+            "max_radius": round(self.radius.max()),
+            "max_altitude": round(self.altitude.max()),
+            "min_altitude": round(self.altitude.min()),
+        }
+        return info
+    
+    def save(self, path: str|Path) -> None:
+        data = {
+            "coords": np.hstack((self.pos.geo, self.pos._time.reshape(-1,1)/np.timedelta64(1, 's'))),
+            "epoch": self.pos.epoch,
+            "frame": self.pos.frame.name,
+            "vel": self.vel.coords,
+            "yaw": self.yaw.degs,
+            "roll": self.roll.degs,
+            "pitch": self.roll.degs,
+            "center": self.center.geo,
+        }
+        np.savez(path, **data)
+
+    @classmethod
+    def load(cls: Type[Spiral], path: str|Path) -> Spiral:
+        """Loads a Spiral object from a saved .npz file."""
+        with np.load(path, allow_pickle=False) as data:
+            pos = Pos(data['coords'], epoch=data['epoch'], frame=data['frame'], geodetic=True)
+            vel = DeltaPos(data['vel'])
+            yaw = Angles(data['yaw'], degrees=True)
+            roll = Angles(data['roll'], degrees=True)
+            pitch = Angles(data['pitch'], degrees=True)
+            center = pos.make(data['center'], geodetic=True)
+        instance = cls(pos, vel, yaw, roll, pitch)
+        instance._center = center
+
+        return instance
+    
+    def __str__(self) -> str:
+        return f"SpiralTrack({len(self.pos)} data points)"
+    
+class Linear(Track):
+    __slots__ = ("_tracks", "_heading", "_initialized")
+    _tracks: list[int]      # Starting indices of tracks, and final index
+    _initialized: bool
+
+    TOL_PAR: float = 0.57   # degrees mean heading is allowed to deviate for tracks to be parallel
+
+    def __new__(cls, *args, **kwargs) -> Linear:
+        return super().__new__(cls, *args, **kwargs)
+
+    @overload
+    def __init__(self, pos: Pos, vel: DeltaPos, yaw: Angles, roll: Angles, pitch: Angles) -> Linear:
+        ...
+
+    @overload
+    def __init__(self, flight: RawFlight) -> Linear:
+        ...
+
+    def __init__(self, arg1: Pos|RawFlight, vel: DeltaPos = None, yaw: Angles = None, roll: Angles = None, pitch: Angles = None) -> Linear:
+        """Initiates a single Linear track instance with already defined
+        - position: Pos object
+        - velocity: DeltaPos object
+        - yaw: Angles object
+        - roll: Angles object
+        - pitch: Angles object"""
+        if hasattr(self, '_initialized') and self._initialized:
+            return
+        super().__init__(arg1, vel, yaw, roll, pitch)
+        self._tracks = [0,len(self)]
+
+    @property
+    def heading(self) -> float:
+        return [track._vel.azimuth.wrap(degrees=True).mean() for track in self.tracks] 
+
+    @property
+    def heading_std(self) -> float:
+        return [track._vel.azimuth.wrap(degrees=True).std() for track in self.tracks] 
+
+    @property
+    def ntracks(self) -> int:
+        return len(self._tracks) - 1
+
+    @property
+    def tracks(self) -> list[Linear]:
+        return [self[start:end] for start, end in zip(self._tracks[:-1], self._tracks[1:])]
+
+    def join(self, other: Linear) -> None:
+        """Joins the other parallel Linear track to the current."""
+        if not isinstance(other, Linear):
+            raise TypeError(f"Only Linear tracks can be joined together, you attemted to join {other} of type {type(other)}")
+        if self.is_parallel(other):
+            self._pos.join(other._pos)
+            self._vel.join(other._vel)
+            self._yaw.join(other._yaw)
+            self._roll.join(other._roll)
+            self._pitch.join(other._pitch)
+            self._tracks = self._tracks + [len(self)]
+        else:
+            raise ValueError(f"Unable to join parallel tracks with headings {self.heading} and {other.heading}")
+    
+    @classmethod
+    def merge(cls: Linear, sequence: Iterable[Linear]) -> Linear:
+        """Merges an iterable object of parallel Linear tracks together into a single object."""
+        joined_track = None
+        for track in sequence:
+            if joined_track is None:
+                joined_track = track
+                continue
+            joined_track.join(track)
+        return joined_track
+    
+    def is_parallel(self, other: Linear|None = None) -> bool:
+        """Returns True if all tracks in self are approximately parallel, otherwise False.
+        
+        If other is also passed, checks if it is also autoparallel, and returns False if not. 
+        If both are autoparallel checks if they are approximately parallel and returns True if
+        they are otherwise False."""
+        headings = self.heading
+        diff = abs(headings - headings[0]) % 180
+        if np.all((diff < self.TOL_PAR) | (diff > 180 - self.TOL_PAR)):
+            if other is None:
+                return True
+            elif isinstance(other,Linear):
+                if other.is_parallel():
+                    diff = abs(other.heading - headings[0]) % 180
+                    if np.all((diff < self.TOL_PAR) | (diff > 180 - self.TOL_PAR)):
+                        return True
+                    else:
+                        return False
+                return False
+            else:
+                raise TypeError(f"Invalid type of other, expected Linear: {type(other)}")
+        else:
+            return False
+
+    def info(self, elevation: float = 0.) -> dict:
+        """Returns a dict with basic information about the tracks:
+        - number_of_tracks: number of separate parallel tracks
+        - X: track number with the following nested keys
+            - t_start: timestamp for start of track
+            - t_end: timestamp for end of track
+            - altitude: mean and std of alitude
+            - yaw: mean and std of yaw
+            - heading: mean and std of heading
+        
+        The elevation parameter specifies a reference (ellipsoidal) elevation relative which flight altitude is counted.
+        If not specified it is set to 0: altitude is equivalent to ellipsoidal height"""
+        info = {
+            "number_of_tracks": self.ntracks,
+        }
+        yaw = self.yaw.wrap(degrees=True)
+        for i, track in enumerate(self.tracks):
+            ts = track.timestamps()
+            info[i] = {
+                "t_start": ts[0],
+                "t_end": ts[1],
+                "altitude": {
+                    "mean": self.pos.h.mean() - elevation,
+                    "std": self.pos.h.std()
+                },
+                "yaw": {
+                    "mean": yaw.mean(),
+                    "std": yaw.std()
+                },
+                "heading": {
+                    "mean": self.heading,
+                    "std": self.heading_std
+                }
+            }
+        
+        return info
+
+    def save(self, path: str|Path) -> None:
+        data = {
+            "coords": np.hstack((self.pos.geo, self.pos._time.reshape(-1,1)/np.timedelta64(1, 's'))),
+            "epoch": self.pos.epoch,
+            "frame": self.pos.frame.name,
+            "vel": self.vel.coords,
+            "yaw": self.yaw.degs,
+            "roll": self.roll.degs,
+            "pitch": self.roll.degs,
+            "tracks": self._tracks,
+        }
+        np.savez(path, **data)
+
+    @classmethod
+    def load(cls: Type[Linear], path: str|Path) -> Linear:
+        """Loads a Spiral object from a saved .npz file."""
+        with np.load(path, allow_pickle=False) as data:
+            pos = Pos(data['coords'], epoch=data['epoch'], frame=data['frame'], geodetic=True)
+            vel = DeltaPos(data['vel'])
+            yaw = Angles(data['yaw'], degrees=True)
+            roll = Angles(data['roll'], degrees=True)
+            pitch = Angles(data['pitch'], degrees=True)
+            tracks = data['tracks']
+        instance = cls(pos, vel, yaw, roll, pitch)
+        instance._tracks = tracks
+
+        return instance
+
+    def __str__(self) -> str:
+        return f"LinearTrack({len(self.pos)} data points)"
+    
+class Irregular(Track):
+    __slots__ = ("_initialized",)
+
+    def __new__(cls, *args, **kwargs) -> Irregular:
+        return super().__new__(cls, *args, **kwargs)
+    
+    @overload
+    def __init__(self, pos: Pos, vel: DeltaPos, yaw: Angles, roll: Angles, pitch: Angles) -> Irregular:
+        ...
+
+    @overload
+    def __init__(self, flight: RawFlight) -> Irregular:
+        ...
+
+    def __init__(self, arg1: Pos|RawFlight, vel: DeltaPos = None, yaw: Angles = None, roll: Angles = None, pitch: Angles = None) -> Irregular:
+        """Initiates a Linear track instance with already defined
+        - position: Pos object
+        - velocity: DeltaPos object
+        - yaw: Angles object
+        - roll: Angles object
+        - pitch: Angles object"""
+        if hasattr(self, '_initialized') and self._initialized:
+            return
+        super().__init__(arg1, vel, yaw, roll, pitch)
+    
+    def info(self, elevation) -> dict:
+        """Provides no information at the moment (empty dict)."""
+        info = {}
+        return info
+    
+    def __str__(self) -> str:
+        return f"IrregularTrack({len(self.pos)} data points)"
+    
 # Find flights
-def find_flights(imu_log: pd.DataFrame) -> tuple[list[pd.DataFrame], float, np.ndarray]:
+def find_flights(data: np.ndarray, reference_date: datetime) -> list[Flight]:
+    
     # Parameters
     minimum_flight_alt = 30  # meters
     minimum_flight_dur = timedelta(minutes=1)
-    minimum_boot_dur = timedelta(minutes=1)
+    minimum_boot_dur = timedelta(minutes=5)
     tol = 0.1  # tolerance for derivative of altitude
 
     # Time step and window size
-    time_step = imu_log["% GPST (s)"].iloc[1] - imu_log["% GPST (s)"].iloc[0]
+    time_step = data[1,0] - data[0,0]
     step = int(timedelta(seconds=10).total_seconds() / time_step)
     window_size = np.ones(step) / step
 
     # Filter altitude signal
-    alt = np.convolve(imu_log["alt (m)"], window_size, mode='same')
+    alt = np.convolve(data[:,3], window_size, mode='same')
     da = np.diff(alt) / time_step
-    idx = np.where(np.abs(da) < tol)[0] # Approximately constant altitude
 
-    # Split into segments of approximately constant altitude
-    split_points = np.where(np.diff(idx) > 1)[0]
-    split_points = np.concatenate(([0], split_points, [len(idx)]))
-    segments = [idx[split_points[i]+1:split_points[i+1]] for i in range(len(split_points)-1)]
+    # Segments of approximately constant altitude
+    idx = np.abs(da) < tol
+    segments = slice_mask(idx)
 
     # Find boot sequence
-    durations = [len(seg) * time_step for seg in segments]
+    durations = [(s.stop - s.start) * time_step for s in segments]
     boot_sequence = next((i for i, dur in enumerate(durations) if dur > minimum_boot_dur.total_seconds()), None)
     if boot_sequence is None:
         return [], time_step, window_size
 
-    ground_alt = imu_log["alt (m)"].iloc[segments[boot_sequence]].mean()
-    imu_log = imu_log.iloc[segments[boot_sequence][0]:].reset_index(drop=True)
+    ground_alt = data[segments[boot_sequence], 3].mean()
 
     # Identify flight segments
-    idx = imu_log.index[imu_log["alt (m)"] > ground_alt + minimum_flight_alt]
-    split_points = np.where(np.diff(idx) > 1)[0]
-    split_points = np.concatenate(([0], split_points, [len(idx)]))
-    segments = [idx[split_points[i]+1:split_points[i+1]] for i in range(len(split_points)-1)]
+    idx = data[:,3] > (ground_alt + minimum_flight_alt)
 
     # Extract flights
-    flights = [imu_log.iloc[seg] for seg in segments if not seg.empty]
+    flights = [Flight.from_log(data[s, :], reference_date) for s in slice_mask(idx)]
 
     # Remove spurious flights
-    durations = [flight["% GPST (s)"].iloc[-1] - flight["% GPST (s)"].iloc[0] for flight in flights]
-    flights = [flight for flight, dur in zip(flights, durations) if dur > minimum_flight_dur.total_seconds()]
+    flights = [flight for flight in flights if flight.dur() > minimum_flight_dur]
 
-    return flights, time_step, window_size
+    return flights, ground_alt
 
-# Classify flights
-def classify_flights(flights: list[pd.DataFrame]) -> list[tuple[str, pd.DataFrame]]:
-    required_turns = 2
-    spiral_flights = []
-    linear_flights = []
-
-    for flight in flights:
-        dif = _yaw_dif(flight)
-        if dif > required_turns * 2 * np.pi:
-            spiral_flights.append(flight)
-        else:
-            linear_flights.append(flight)
-
-    return [('Spiral', flight) for flight in spiral_flights] + [('Linear', flight) for flight in linear_flights]
-
-def _yaw(flight: pd.DataFrame) -> np.ndarray:
-    # Convert heading from degrees to radians and unwrap
-    return np.unwrap(np.pi * flight["heading (deg)"] / 180)
-
-def _yaw_dif(flight: pd.DataFrame) -> np.floating:
-    y = _yaw(flight)
-    return np.max(y) - np.min(y)
-
-# Refine flights
-def refine_flights(flights: list[tuple[str, pd.DataFrame]], time_step: float, window_size: np.ndarray, npar: int = os.cpu_count()) -> list[tuple[str, pd.DataFrame, pd.DataFrame]]:
+# Find tracks
+def find_tracks(flights: list[Flight], npar: int = os.cpu_count()) -> dict[str, int]:
 
     with Pool(processes=npar) as pool:
-        results = pool.map(_refine, [
-            (tagged_flight, time_step, window_size) for tagged_flight in flights
-            ])
-        
-    return [(tag, flight, track) for tag, flight, track in results if 
-            (isinstance(track, pd.DataFrame) and not track.empty) or
-            (isinstance(track, list) and track)
-        ]
+        tracks = pool.map(_get_track, flights)
 
-def _refine(args: tuple[tuple[str, pd.DataFrame], float, np.ndarray]) -> tuple[str, pd.DataFrame, pd.DataFrame]:
-    tagged_flight, time_step, window_size = args
-    tag = tagged_flight[0]
-    flight = tagged_flight[1]
-    if tag == 'Linear':
-        return tag, flight, _refine_linear(flight, time_step=time_step)
-    if tag == 'Spiral':
-        return tag, flight, _refine_spiral(flight, time_step=time_step, window_size=window_size)
+    counters = {
+        "spiral": 0,
+        "linear": 0,
+        "irregular": 0,
+    }
+    for flight, track in zip(flights, tracks):
+        flight._track = track
+        match track:
+            case Spiral():
+                counters["spiral"] += 1
+            case Linear():
+                counters["linear"] += 1
+            case Irregular():
+                counters["irregular"] += 1
     
-## Refine spiral
-def _refine_spiral(flight: pd.DataFrame, time_step: float, window_size: np.ndarray) -> pd.DataFrame:
-    tol = 3e-3  # tolerance for second derivative of yaw
+    return counters
 
-    # Step 1: Get yaw and smooth it
-    y = _yaw(flight)
-    y = np.convolve(y, window_size, mode='full')[:len(y)]
+def _get_track(flight: Flight) -> Track:
+    return flight.track
 
-    # Step 2: First and second derivatives
-    dy = np.gradient(y, time_step)
-    dy = np.convolve(dy, window_size, mode='full')[:len(dy)]
-    ddy = np.gradient(dy, time_step)
-
-    # Step 3: Find indices with low second derivative
-    idx = np.where(np.abs(ddy) < tol)[0]
-
-    # Step 4: Split into segments
-    split_points = np.where(np.diff(idx) > 1)[0]
-    split_points = np.concatenate(([0], split_points, [len(idx)]))
-    segments = [idx[split_points[i]+1:split_points[i+1]] for i in range(len(split_points)-1)]
-
-    # Step 5: Find longest segment
-    if not segments:
-        return pd.DataFrame() # Empty if no valid segment
-
-    longest = max(segments, key=len)
-
-    # Step 6: Cut log for longest segment
-    ext = 2 * len(window_size)
-    start = max(0, longest[0] - ext)
-    end = longest[-1]
-    segment = flight.iloc[start:end + 1].copy()
-
-    # Step 7: Estimate azimuth
-    az, _, _, _ = _get_azimuth(segment)
-    daz = np.gradient(az) / np.gradient(segment['% GPST (s)'])
-
-    # Step 8: Find change points in azimuth derivative
-    inliers = find_inliers(daz, min_samples=0.9, relative_threshold=0.2)
-    #inliers = _extend_indices(inliers, len(segment), time_step, extension=1)
-
-    # Step 9: Final cut
-    refined_segment = segment.iloc[inliers].copy()
-    return refined_segment
-
-def _get_azimuth(spiral_track: pd.DataFrame) -> tuple[np.ndarray, np.ndarray, float, float]:
-    # Get lat/lon coordinates for conversion to UTM coordinates
-    lat = spiral_track["lat (deg)"].to_numpy()
-    lon = spiral_track["lon (deg)"].to_numpy()
-
-    # Convert to UTM
-    x, y = geo_to_map(lat=lat, lon=lon)
-    coords = np.column_stack((x, y))
-
-    # Initial guess: centroid
-    initial_center = coords.mean(axis=0)
-
-    # Objective function: deviation from linear radius vs angle
-    def spiral_error(center: np.ndarray) -> np.floating:
-        dx = coords[:, 0] - center[0]
-        dy = coords[:, 1] - center[1]
-        radius = np.sqrt(dx**2 + dy**2)
-        angle = np.unwrap(np.arctan2(dy, dx))
-        p = np.polyfit(angle, radius, 1)
-        fit_radius = np.polyval(p, angle)
-        return np.mean((radius - fit_radius)**2)
-
-    result = minimize(spiral_error, initial_center, method='Nelder-Mead')
-    optimal_center = result.x
-
-    # Compute radius and azimuth
-    dx = coords[:, 0] - optimal_center[0]
-    dy = coords[:, 1] - optimal_center[1]
-    r = np.sqrt(dx**2 + dy**2)
-    az = np.unwrap(np.arctan2(dx, dy)) * 180 / np.pi  # degrees
-
-    # Convert center back to lat/lon
-    transformer_back = Transformer.from_crs("epsg:32633", "epsg:4326", always_xy=True)
-    lon0, lat0 = transformer_back.transform(optimal_center[0], optimal_center[1])
-
-    return az, r, lat0, lon0
-
-## Refine linear
-def _refine_linear(flight: pd.DataFrame, time_step: float) -> list[pd.DataFrame]:
-    tol_const = 1.1
-    tol_par = 0.01
-    min_flight_time = 5  # seconds
-
-    # Calculate heading
-    heading = np.arctan2(flight['vn (m/s)'], flight['ve (m/s)'])
-    heading = np.unwrap(heading)
-
-    # Derivative of heading
-    dh = np.diff(heading) / time_step
-    idx = np.where(np.abs(dh) < tol_const)[0]
-
-    # Split into segments
-    split_points = np.where(np.diff(idx) > 1)[0]
-    segments = [idx[i+1:j+1] for i, j in zip([0]+split_points.tolist(), split_points.tolist()+[len(idx)-1])]
-
-    # Filter short segments
-    segments = [seg for seg in segments if len(seg) * time_step >= min_flight_time]
-
-    # Remove first segment, corresponding to the drone flight to mission
-    if len(segments) > 2:
-        segments = segments[1:]
-
-    # Compute mean heading for each segment
-    segment_headings = [np.mean(heading[seg]) for seg in segments]
-
-    # Find longest segment
-    lengths = [len(seg) for seg in segments]
-    if not lengths:
-        return []
-    longest_idx = np.argmax(lengths)
-    ref_heading = segment_headings[longest_idx]
-
-    # Filter segments that are approximately parallel
-    parallel_segments = [seg for seg, h in zip(segments, segment_headings) if abs(h - ref_heading) < tol_par
-                            or abs(h - (ref_heading + np.pi)) < tol_par]
-
-    # Extract refined tracks
-    if parallel_segments:
-        tracks = [flight.iloc[seg] for seg in parallel_segments]
-
-    return tracks
+# Rudimentary analysis
+def analyze_tracks(flights: list[Flight], base_ele: float) -> dict:
+    """Returns dict containing information about all tracks."""
+    n_spiral = 0
+    n_linear = 0
+    info = {}
+    for i, flight in enumerate(flights, start=1):
+        if isinstance(flight.track, Spiral):
+            n_spiral += 1
+            if 'Spirals' not in info:
+                info['Spirals'] = {}
+            info['Spirals'][n_spiral] = flight.track.info(elevation=base_ele)
+            info['Spirals'][n_spiral]['flight_num'] = i
+        if isinstance(flight.track, Linear):
+            n_linear += 1
+            info[f'Linear_{n_linear}'] = flight.track.info(elevation=base_ele)
+            info[f'Linear_{n_linear}']['flight_num'] = i
+    
+    return info
 
 # Plot results
-def plot_tracks(tracks: tuple[str, pd.DataFrame, pd.DataFrame] | tuple[str, pd.DataFrame, list[pd.DataFrame]],
-                path: Path = '.', dry: bool = False):
-    path=Path(path)
-    n = len(tracks)
-    n_spirals = 0
-    n_linear = 0
-    cols = math.ceil(math.sqrt(n))
-    rows = math.ceil(n / cols)
-    fig, axs = plt.subplots(rows, cols, figsize=(4*cols, 3*rows), squeeze=False)
-    axs = axs.flatten()
-    for i, pack in enumerate(tracks):
-        tag = pack[0]
-        flight = pack[1]
-        track = pack[2]
-        if tag == 'Spiral':
-            n_spirals += 1
-            axs[i].plot(flight['lon (deg)'], flight['lat (deg)'], 'r', label="Full flights" if i==0 else None)
-            axs[i].plot(track['lon (deg)'], track['lat (deg)'], 'g', label="Tracks found" if i==0 else None)
-            axs[i].set_xlabel("lon (deg)")
-            axs[i].set_ylabel("lat (deg)")
-            axs[i].set_title(f"Spiral {n_spirals}")
-        if tag == 'Linear':
-            n_linear += 1
-            axs[i].plot(flight['lon (deg)'], flight['lat (deg)'], 'r', label="Full flights" if i==0 else None)
-            for j, tr in enumerate(track):
-                axs[i].plot(tr['lon (deg)'], tr['lat (deg)'], 'g', label="Tracks found" if i==0
-                            and j==0 else None)
-            axs[i].set_xlabel("lon (deg)")
-            axs[i].set_ylabel("lat (deg)")
-            axs[i].set_title(f"Linear {n_linear}: {len(track)} tracks")
-    for i in range(n,len(axs)):
-       axs[i].axis('off')
+def plot_tracks(
+    flights: list[Flight],
+    ncols: int = 3,
+    figsize: tuple[int, int] = (12, 8),
+    suptitle: str|None = None,
+    tight: bool = True,
+) -> tuple[Figure, npt.ArrayLike[Axes]]:
+    """
+    Plot multiple Flight tracks in a grid of subplots.
 
-    # Collect handles and labels
-    handles, labels = axs[0].get_legend_handles_labels()
-    fig.legend(handles, labels, loc='upper center', ncols=len(labels), bbox_to_anchor=(0.5, 1))
-    fig.canvas.manager.set_window_title("Trackfinder results")
+    Parameters
+    ----------
+    flights : list[Flight]
+        A list of Flight objects.
+    ncols : int
+        Number of columns in the grid.
+    figsize : tuple[float, float]
+        Figure size in inches.
+    sharex : bool
+        Share x-limits across subplots.
+    sharey : bool
+        Share y-limits across subplots.
+    suptitle : str | None
+        Optional figure-level title.
+    tight : bool
+        If True, apply fig.tight_layout() at the end.
 
-    plt.tight_layout(rect=[0, 0, 1, 0.95])
-    if dry:
-        print("Showing tracks ...", end=" ", flush=True)
-        plt.show()
-        print("done.")
-    else:
-        fig_name = path.with_name(path.stem + "_trackfinder_results.pdf")
-        fig.savefig(fig_name, format="pdf")
-        print(f"Trackfinder results saved to {fig_name}")
+    Returns
+    -------
+    fig : matplotlib.figure.Figure
+    axes : numpy.ndarray
+        2D array of Axes. Unused axes are set invisible.
+    """
+    n = len(flights)
+    if n == 0:
+        fig, ax = plt.subplots(figsize=figsize)
+        ax.set_visible(False)
+        if suptitle:
+            fig.suptitle(suptitle)
+        if tight:
+            fig.tight_layout()
+        return fig, np.array([[ax]])
 
-# Analyze tracks
-def analyze_tracks(tracks, flight_info, base_ele, dem_path, npar: int = os.cpu_count()):
-    spiral_tracks = {}
-    linear_tracks = {}
-    with Manager() as manager:
-        counters = manager.dict()
-        lock = manager.Lock()
+    nrows = (n + ncols - 1) // ncols  # ceiling division
 
-        with Pool(processes=npar) as pool:
-            results = pool.starmap(_analyze, [
-                (tagged_track, flight_info, base_ele, dem_path, counters, lock) for tagged_track in tracks
-            ])
-            
-            for tag, i, track, updated_info in results:
-                if tag == 'Spiral':
-                    spiral_tracks[i] = track
-                    flight_info['Spirals'][i] = updated_info
-                if tag == 'Linear':
-                    linear_tracks[i] = track
-                    flight_info[f'Linear_{i}'] = updated_info
-    
-    return spiral_tracks, linear_tracks
+    fig, axes = plt.subplots(nrows, ncols, figsize=figsize)
+    axes = np.atleast_2d(axes)
 
-def _analyze(tagged_track, flight_info, base_ele, dem_path, counters, lock) -> tuple[str, int, pd.DataFrame, dict]:
-    tag = tagged_track[0]
-    track = tagged_track[2]
-    with lock:
-        counters[tag] = counters.get(tag, 0) + 1
-        i = counters[tag]
-    if tag == 'Spiral':
-        track_info = flight_info['Spirals'][i]
-        track, updated_info = analyze_spiral(track, track_info, base_ele, dem_path)
-    if tag == 'Linear':
-        track_info = flight_info[f'Linear_{i}']
-        updated_info = analyze_linear(track, track_info, base_ele)
-    return (tag, i, track, updated_info)
+    for i, flight in enumerate(flights):
+        r, c = divmod(i, ncols)
+        ax = axes[r, c]
+        # Call your method that draws into a specific Axes
+        # It should accept ax=... and return (ax, fig_created) or just ax
+        flight.plot(ax=ax, flight_id=i+1)
 
-## Analyze spirals
-def analyze_spiral(track: pd.DataFrame, track_info: dict, base_ele: float, dem_path: Path) -> tuple[pd.DataFrame, dict]:
-    # Correct time stamps
-    track_info['t_start'] = format_duration(track['% GPST (s)'].iloc[0])
-    track_info['t_end'] = format_duration(track['% GPST (s)'].iloc[-1])
-    track_info['duration (s)'] = track['% GPST (s)'].iloc[-1] - track['% GPST (s)'].iloc[0]
-    # Find center voxel
-    _, _, lat0, lon0 = _get_azimuth(track)
-    h0 = elevation(lat0, lon0, dem_path)
-    # Calculate ENU distance vector from center to track
-    diff = ecef_to_enu(lat0, lon0) @ (geo_to_ecef(track['lon (deg)'].to_numpy(), track['lat (deg)'].to_numpy(), track['alt (m)'].to_numpy()) - geo_to_ecef(lon0, lat0, h0))
-    flight_alt = diff[2] # Flight altitude relative center point (m)
-    r = np.sqrt(diff[0]**2 + diff[1]**2) # radius relative center point (m)
-    az = np.unwrap(np.arctan2(diff[0], diff[1])) * 180 / np.pi # azimuth relative center point (deg)
-    # Add variables to track data
-    track['radius (m)'] = r
-    track['azimuth (deg)'] = az
-    track['flight_alt (m)'] = flight_alt
-    # Add parameters to flight_info
-    track_info['center_lat'] = lat0
-    track_info['center_lon'] = lon0
-    track_info['center_elevation (m)'] = h0
-    track_info['base_altitude (m)'] = base_ele - h0 # Base altitude relative center point
-    track_info['top_radius'] = round(r.min())
-    track_info['bottom_radius'] = round(r.max())
-    track_info['top_flight_altitude'] = round(flight_alt.max())
-    track_info['bottom_flight_altitude'] = round(flight_alt.min())
+    # Hide any unused axes (e.g., when n is not a multiple of ncols)
+    for j in range(n, nrows * ncols):
+        r, c = divmod(j, ncols)
+        axes[r, c].set_visible(False)
 
-    return track, track_info
+    if suptitle:
+        fig.suptitle(suptitle)
 
-## Analyze linear tracks
-def analyze_linear(tracks: list[pd.DataFrame], tracks_info: dict, base_ele: float) -> dict:
-    for i, track in enumerate(tracks):
-        track_info = tracks_info[i+1]
-        # Correct time stamps
-        track_info['t_start'] = format_duration(track['% GPST (s)'].iloc[0])
-        track_info['t_end'] = format_duration(track['% GPST (s)'].iloc[-1])
-        # Add track start and end positions
-        track_info['lat_start'] = track['lat (deg)'].iloc[0]
-        track_info['lon_start'] = track['lon (deg)'].iloc[0]
-        track_info['lat_end'] = track['lat (deg)'].iloc[-1]
-        track_info['lon_end'] = track['lon (deg)'].iloc[-1]
-        # Add base elevation and flight altitude information relative base elevation
-        track_info['base_elevation'] = base_ele
-        flight_alt = track['alt (m)'].to_numpy() - base_ele
-        yaw = _yaw(track)
-        heading = np.unwrap(np.arctan2(track['vn (m/s)'], track['ve (m/s)']))
-        track_info['flight_alt (m)'] = {
-            'mean': np.mean(flight_alt),
-            'std': np.std(flight_alt)
-        }
-        track_info['yaw (deg)'] = {
-            'mean': np.mean(yaw),
-            'std': np.std(yaw)
-        }
-        track_info['heading (deg)'] = {
-            'mean': np.mean(heading),
-            'std': np.std(heading)
-        }
-    return tracks_info
+    if tight:
+        fig.tight_layout()
+
+    return fig, axes
 
 # Modify the radar[...].inf file
-def modify_radar_inf(path: Path, info: dict, dry: bool = False) -> None:
+def modify_radar_inf(path: Path, info: dict, dry: bool = False) -> Path:
     """
     Modify radar_logger_dat-[...].inf file with new track timestamps.
     
@@ -397,30 +937,28 @@ def modify_radar_inf(path: Path, info: dict, dry: bool = False) -> None:
     """
     t_start = []
     t_end = []
-    for i, ts in info.items():
+    for ts in info.values():
         if not isinstance(ts, dict):
             continue
-        # print(json.dumps(ts))
         t_start.append(ts['t_start'])
-        t_end.append(ts['t_start'])
+        t_end.append(ts['t_end'])
     folder = path.parent
-    date, timestamp = _extract_timestamp(path.name)
-    base_name = f"radar_logger_dat-{date}-{timestamp}.inf"
+    dt = parse_datetime_string(path.name[17:36])
+    base_name = f"radar_logger_dat-{dt.strftime("%Y-%m-%d-%H-%M-%S")}.inf"
     inf_path = folder / base_name
 
     # Try ±1 second if file not found
-    def try_alternatives(ts) -> Path|None:
-        dt = datetime.strptime(ts, "%H-%M-%S")
+    def try_alternatives() -> Path|None:
         for delta in [1, -1]:
-            new_ts = (dt + timedelta(seconds=delta)).strftime("%H-%M-%S")
-            alt_name = f"radar_logger_dat-{date}-{new_ts}.inf"
+            new_dt = dt + timedelta(seconds=delta)
+            alt_name = f"radar_logger_dat-{new_dt.strftime("%Y-%m-%d-%H-%M-%S")}.inf"
             alt_path = folder / alt_name
             if alt_path.exists():
                 return alt_path
         return None
 
     if not inf_path.exists():
-        alt_path = try_alternatives(timestamp)
+        alt_path = try_alternatives()
         if alt_path:
             inf_path = alt_path
 
@@ -456,125 +994,111 @@ def modify_radar_inf(path: Path, info: dict, dry: bool = False) -> None:
         f.write(" ".join(t_end) + "\n")
         f.write(" ".join(radar_inf[24:-2]) + "             " + " ".join(radar_inf[-2:]))
 
-def _extract_timestamp(filename) -> tuple[str|None, str|None]:
-    # Match pattern like 2025-09-02-18-10-42
-    match = re.search(r'(\d{4}-\d{2}-\d{2})-(\d{2}-\d{2}-\d{2})', filename)
-    if match:
-        date = match.group(1)
-        timestamp = match.group(2)
-        return date, timestamp  
-    return None, None
+    return inf_path
 
 # Orchestrating functions
 ## trackfinder
 def trackfinder(
         path: str|Path,
-        dem_path: str|Path = None,
         linear: int = 0,
         verbose: bool = False,
         dry: bool = False,
         npar: int = os.cpu_count()
-) -> tuple[dict[int, pd.DataFrame], dict[int, pd.DataFrame]]:
+) -> list[Spiral]:
+    """Reads a radar_logger_dat-[...].mocob file and segments it to find flights and identify their tracks, classified as 
+    - Spiral: the track consists of the spiral part of the flight,
+    - Linear: the track consists of the parallel linear segments,
+    - Irregular: the track consists of the entire flight.
 
-    ## 1. Read file into DataFrame and get base altitude
+    If the linear parameter is set to 0 (default), the radar_logger_dat-[...].inf file will be modified to contain the
+    time stamps of the spiral flights. By setting the value to a positive integer, the time stamps of the linear segments
+    corresponding to the track selected will be inserted instead.
+    
+    Returns a list of Spirals by default, or the Linear segments of the track if the linear parameter is non-zero."""
+
+    # 1. Read file into DataFrame and get base altitude
     path=Path(path)
 
-    # Get date and timestamp as strings for file naming
-    date, timestamp = _extract_timestamp(path.name)
-    base_path = path.with_name(f"{date}-{timestamp}")
+    ## Get date and timestamp as strings for file naming
+    dt = parse_datetime_string(path.name[17:36])
     
-    if not (path.is_file and path.suffix == '.moco'):
-        raise ValueError("trackfinder must be called with a path to a .moco file")
-    print("Reading .moco file ...", end=" ", flush=True)
-    imu_log = pd.read_csv(path, sep='\t', skipinitialspace=True)
-    base_ele = np.mean(imu_log['alt (m)'][0:10])
-    print("done.")
+    print(f"Segmenting log: {path}", flush=True)
+    data = srf(path)
 
-    ## 2. Segment flights
-    print("Segmenting flights ...", end=" ", flush=True)
-    flights, time_step, window_size = find_flights(imu_log)
+    # 2. Find flights
+    flights, base_ele = find_flights(data, dt)
+    print(f"{len(flights)} flights found ...", flush=True)
 
-    ## 3. Classify flights
-    flights = classify_flights(flights)
-    tag_counts = Counter(tag for tag, _ in flights)
+    # 3. Find tracks
+    counters = find_tracks(flights, npar=npar)
+    print(f' > {counters['spiral']} spiral,')
+    print(f' > {counters['linear']} linear', end="")
+    if counters['irregular'] > 0:
+        print(f',\n > {counters['irregular']} irregular.')
+    else:
+        print(".")
 
-    ## 4. Refine tracks
-    tracks = refine_flights(flights=flights, time_step=time_step, window_size=window_size, npar=npar)
-    print("done.")
+    # 5. Perform rudimentary analysis of tracks
+    print("\nAnalyzing tracks ...", end=" ", flush=True)
+    flight_info = analyze_tracks(flights, base_ele=base_ele)
+    print("done.\n")
 
-    ## 5. Plot tracks
-    plot_tracks(tracks, path=base_path, dry=dry)
-
-    ## 6. Get track timestamps
-    flight_info = defaultdict(dict)
-    if verbose:
-        print() # Empty line
-        result = f"{len(flights)} flights found: {tag_counts['Spiral']} spiral and {tag_counts['Linear']} linear."
-        print(result)
-    # Get spiral track timestamps
-    n_spiral = 0
-    n_linear = 0
-    for tag, _, track in tracks:
-        if tag == 'Spiral':
-            n_spiral += 1
-            t_start = track['% GPST (s)'].iloc[0]
-            t_end = track['% GPST (s)'].iloc[-1]
-            flight_info['Spirals'][n_spiral] = {'t_start': format_duration(t_start), 't_end': format_duration(t_end)}
-        if tag == 'Linear':
-            n_linear += 1
-            for i, tr in enumerate(track):
-                t_start = tr['% GPST (s)'].iloc[0]
-                t_end = tr['% GPST (s)'].iloc[-1]
-                flight_info[f'Linear_{n_linear}'][i+1] = {'t_start': format_duration(t_start), 't_end': format_duration(t_end)}
-    
-    # Modify radar_inf file
-    if not dry:
-        if linear == 0:
-            modify_radar_inf(path, flight_info['Spirals'], dry=dry)
-        elif linear:
-            modify_radar_inf(path, flight_info[f'Linear_{linear}'], dry=dry)
-
-    # 7. Perform rudimentary analysis of tracks
-    print("Analyzing tracks ...", end=" ", flush=True)
-    spiral_tracks, linear_tracks = analyze_tracks(tracks=tracks, flight_info=flight_info, base_ele=base_ele, dem_path=dem_path, npar=npar)
-    print("done.")
-
-    meta_str = "Altitude is counted relative the center coordinate (ground level)."
-    flight_info['Spirals'] = add_meta(flight_info['Spirals'], meta_str)
     meta_str = "Altitude is counted relative the base position (take off)."
-    for i in range(tag_counts['Linear']):
-        flight_info[f'Linear_{i+1}'] = add_meta(flight_info[f'Linear_{i+1}'], meta_str)
-    
-    # 8. Print track info
-    if verbose:
-        print(json.dumps(flight_info, indent=4))
-         
-    # 9. File generation
-    if not dry:
-        # Save flight_info
-        flight_info = add_meta(flight_info, result, '__flights__')
-        fi_path = base_path.with_name(base_path.base + "_flight_info.json")
-        with open(fi_path) as f:
-            json.dump(flight_info, f, indent=4)
-        print(f"Information about tracks saved to {fi_path}")
+    flight_info = add_meta(flight_info, meta_str)
 
-        # Save .moco cuts:
-        counter = Counter()
-        print(f"Saving .moco cuts:")
-        for i, track in spiral_tracks:
-            dst = base_path.with_name(base_path.base + f"-{i:02}_spiral.moco_cut")
-            print(dst)
-            track.to_csv(dst, index=False)
-    
-            # Save linear track .moco cuts
-        for i, tracks in linear_tracks:
-            for j, track in enumerate(tracks):
-                dst = base_path.with_name(base_path.base + f"-{j:02}_linear_{i}.moco_cut")
-                print(dst)
-                track.to_csv(dst, index=False)
+    if verbose or Settings().VERBOSE:
+        print(json.dumps(flight_info, indent=4))
+
+    ## 6. Plot tracks
+    fig, axes = plot_tracks(flights, suptitle=f"{dt.strftime("%Y-%m-%d")}: tracks")
+    if dry:
+        plt.show()
+   
+    # 7. File generation
+    else:
+        # Save plot of tracks
+        fig_path = path.with_name(dt.strftime("%Y-%m-%d-%H-%M-%S-trackfinder.pdf"))
+        fig.savefig(fig_path)
+        print(f"Plot of tracks saved to {fig_path}", flush=True)
+        
+        # Modify radar_inf file
+        if linear == 0:
+            inf_path = modify_radar_inf(path, flight_info['Spirals'], dry=dry)
+        elif linear:
+            inf_path = modify_radar_inf(path, flight_info[f'Linear_{linear}'], dry=dry)
+        print(f"Timestamps saved to {inf_path}", flush=True)
+        
+        # Save flight_info
+        result = f"{len(flights)} flights found: {counters['spiral']} spiral, {counters['linear']} linear"
+        if counters['irregular'] > 0:
+            result += f", {counters['irregular']} irregular."
+        else:
+            result += "."
+        flight_info = add_meta(flight_info, result, '__flights__')
+        fi_path = path.with_name(dt.strftime("%Y-%m-%d-%H-%M-%S-flight_info.json"))
+        with open(fi_path, 'w') as f:
+            json.dump(flight_info, f, indent=4)
+        print(f"Information about tracks saved to {fi_path}", flush=True)
+
+        # Save tracks:
+        print(f"Saving tracks ...", flush=True)
+        n_spiral = 0
+        n_linear = 0
+        for flight in flights:
+            if flight.type == 'Spiral':
+                n_spiral += 1
+                file_name = path.with_name(dt.strftime(f"%Y-%m-%d-%H-%M-%S-{n_spiral:02}-spiral_track.npz"))
+            elif flight.type == 'Linear':
+                n_linear += 1
+                file_name = path.with_name(dt.strftime(f"%Y-%m-%d-%H-%M-%S-{n_linear:02}-linear_track.npz"))
+            print(f" > {file_name}")
+            flight.track.save(file_name)
             
     print("All done.")
-    return spiral_tracks, linear_tracks
+    if linear == 0:
+        return [flight.track for flight in flights if flight.type == 'Spiral']
+    else:
+        return flight[flight_info[f'linear_{linear}']['flight_num']].track
 
 ## Model spiral tracks
 def model_spirals(tracks, path, dry, verbose, npar: int = os.cpu_count()):

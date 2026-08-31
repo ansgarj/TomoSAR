@@ -1,43 +1,301 @@
 from __future__ import annotations
-from pyproj import Transformer
-from datetime import datetime, timezone
+from pyproj import Transformer, CRS
+from datetime import datetime, timedelta, timezone
 import numpy as np
 import numpy.typing as npt
-from typing import Iterator
+from typing import Iterator, TypeVar, Type
 import rasterio
 from rasterio.vrt import WarpedVRT
 from rasterio.enums import Resampling
 
-from .manager import resource
 from .config import Settings
+from .manager import resource
+from .utils import verify_dt64, verify_td64, Angles, IndexType
 
+class ReferenceFrame:
+    _frame: str
+    
+    @property
+    def name(self) -> str:
+        return self._frame
+    
+    @name.setter
+    def name(self, value: str|ReferenceFrame) -> None:
+        self._frame = ReferenceFrame(value).name
+
+    def __init__(self, frame: str) -> ReferenceFrame:
+        """A Reference Frame Object initialized by a string representing the Frame. Implemented reference frames are:
+        - ITRF: alias for latest ITRF realization (ITRF2020)
+        - ITRF2020
+        - ETRF: alias for latest ETRF realization (ETRF2020)
+        - ETRF2020
+        - SWEREF99
+        - EUREF89
+        - EUREF-FIN
+        - EUREF-DK94
+        - LKS-94
+        - LKS-92
+        - EUREF-EST97
+
+        A reference frame can also be initialized by a string specifying a canonical location:
+        - WGS84 (ITRF)
+        - EUROPE (ETRF)
+        - SWEDEN (SWEREF99)
+        - NORWAY (EUREF89)
+        - FINLAND (EUREF-FIN)
+        - DENMARK (EUREF-DK94)
+        - LITHUANIA (LKS-94)
+        - LATVIA (LKS-92)
+        - ESTONIA (EUREF-EST97)
+        
+        Pos is a Reference Frame aware position representation, and DeltaPos represents a position offset, while ReferenceFrame
+        handles the Reference Frames (parallels datetime objects datetime, timedelta, timezone but with array representation
+        instead of scalar)."""
+
+        if isinstance(frame, ReferenceFrame):
+            self._frame = frame.name
+            return
+        
+        self._frame = Settings().resolve_frame(frame)
+    
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, str):
+            return self.name == other
+        if isinstance(other, ReferenceFrame):
+            return self.name == other.name
+        return NotImplemented
+    
+    def __str__(self) -> str:
+        return self.name
+    
+    def __repr__(self) -> str:
+        return f"ReferenceFrame({self.name})"
+    
+    def as_frame(self, target: str|ReferenceFrame, *coordinates: float|np.ndarray|tuple[float|np.ndarray, ...], epoch: float|datetime|None = None) -> tuple[float|np.ndarray, ...]:
+        """Transforms coordinate (arrays) from this Reference Frame to the one specified by the target parameter.
+        The time coordinate can be passed in the same format as the spatial coordinates (decimal year), or as a
+        separate parameter (accepts datetime objects, UTC timezone).
+    
+        For Pos objects use the reframe method."""
+        target = ReferenceFrame(target)
+        if target == self:
+            return coordinates[0:3]
+        
+        transformer_map = {
+            "ITRF2020": {
+                "ETRF2020": _itrf20_to_etrf20,
+                "SWEREF99": _itrf20_to_sweref,
+                "EUREF-FIN": _itrf20_to_finref,
+                "EUREF-DK94": _itrf20_to_dkref,
+                "LKS-94": _itrf20_to_litref,
+                "LKS-92": _itrf20_to_latref,
+                "EUREF-EST97": _itrf20_to_estref,
+                "EUREF89": _itrf20_to_noref,
+            },
+            "ETRF2020": {
+                "ITRF2020": _etrf20_to_itrf20,
+                "SWERFEF99": _etrf20_to_sweref,
+                "EUREF-FIN": _etrf20_to_finref,
+                "EUREF-DK94": _etrf20_to_dkref,
+                "LKS-94": _etrf20_to_litref,
+                "LKS-92": _etrf20_to_latref,
+                "EUREF-EST97": _etrf20_to_estref,
+                "EUREF89": _etrf20_to_noref,
+            },
+            "SWEREF99": {
+                "ITRF2020": _sweref_to_itrf20,
+                "ETRF2020": _sweref_to_etrf20
+            },
+            "EUREF-FIN": {
+                "ITRF2020": _finref_to_etrf20,
+                "ETRF2020": _finref_to_etrf20
+            },
+            "EUREF-DK94": {
+                "ITRF2020": _dkref_to_itrf20,
+                "ETRF2020": _dkref_to_etrf20
+            },
+            "LKS-94": {
+                "ITRF2020": _litref_to_itrf20,
+                "ETRF2020": _litref_to_etrf20
+            },
+            "LKS-92": {
+                "ITRF2020": _latref_to_itrf20,
+                "ETRF2020": _latref_to_etrf20
+            },
+            "EUREF-EST97": {
+                "ITRF2020": _estref_to_itrf20,
+                "ETRF2020": _estref_to_etrf20
+            },
+            "EUREF89": {
+                "ITRF2020": _noref_to_itrf20,
+                "ETRF2020": _noref_to_etrf20
+            }
+        }
+        return transformer_map[self.name][target.name](*coordinates, epoch=epoch)[0:3]
+        
+    @property
+    def ecef_epsg(self) -> int:
+        """Returns the EPSG code pointing the the ECEF coordinates of this frame."""
+        epsg = { 
+            "ITRF2020": 9988,
+            "ETRF2020": 10569,
+            "SWEREF99": 7928, 
+            "EUREF-FIN": 7926,
+            "EUREF-DK94": 7920,
+            "EUREF-EST97": 7926,
+            "LKS-94": 7930,
+            "LKS-92": 7914,
+            "EUREF89": 7922,
+        }
+        return epsg[self.name]
+    
+    @property
+    def ecef_crs(self) -> CRS:
+        """Returns the pyproj.CRS object of the ECEF coordinates of this frame."""
+        return CRS.from_epsg(self.ecef_epsg)
+    
+    @property
+    def llh_epsg(self) -> int:
+        """Returns the EPSG code pointing the the LLH coordinates of this frame."""
+        epsg = { 
+            "ITRF2020": 9989,
+            "ETRF2020": 10570,
+            "SWEREF99": 7929, 
+            "EUREF-FIN": 7927,
+            "EUREF-DK94": 7921,
+            "EUREF-EST97": 7927,
+            "LKS-94": 7931,
+            "LKS-92": 7915,
+            "EUREF89": 7923,
+        }
+        return epsg[self.name]
+    
+    @property
+    def llh_crs(self) -> CRS:
+        """Returns the pyproj.CRS object of the LLH coordinates of this frame."""
+        return CRS.from_epsg(self.llh_epsg)
+    
+    @property
+    def geo_epsg(self) -> int:
+        """Returns the EPSG code pointing the the 2D geodetic (lat, lon) coordinates of this frame."""
+        epsg = {
+            "ITRF2020": 9989,
+            "ETRF2020": 10570,
+            "SWEREF99": 7929,
+            "EUREF-FIN": 7927,
+            "EUREF-DK94": 7921,
+            "EUREF-EST97": 7927,
+            "LKS-94": 7931,
+            "LKS-92": 7915,
+            "EUREF89": 7923,
+        }
+        
+        return epsg[self.name]
+    
+    @property
+    def geo_crs(self) -> CRS:
+        """Returns the pyproj.CRS object of the 2D geodetic (lat, lon) coordinates of this frame."""
+        return CRS.from_epsg(self.geo_epsg)
+
+    def proj_epsg(self, lat: float|None = None, lon: float|None = None) -> int:
+        """Returns the EPSG code of the projected coordinate system matching lon and lat coordinates.
+        The coordinates can be omitted for some national Reference Frames (those having only
+        one implemented national projected coordinate system).
+        
+        ITRF and ETRF require both lat and lon to be specified, and EUREF-DK94 require lon to be specified."""
+        match self.name:
+            case "ITRF2020":
+                epsg = _iutm(lat=lat, lon=lon)
+            case "ETRF2020":
+                epsg = _eutm(lat=lat, lon=lon)
+            case "SWEREF99":
+                epsg = 3006
+            case "EUREF-FIN":
+                epsg = 3067
+            case "EUREF-DK94": 
+                epsg =  _dktm(lon)
+            case "EUREF-EST97": 
+                epsg = 3301
+            case "LKS-94":
+                epsg = 3346
+            case "LKS-92": 
+                epsg = 3059
+            case "EUREF89": 
+                epsg = _eutm(lat=lat, lon=lon)
+
+        return epsg
+    
+    def proj_crs(self, lat: float|None = None, lon: float|None = None) -> CRS:
+        """Returns the pyproj.CRS object of the of the projected coordinate system matching lon and lat
+        coordinates. The coordinates can be omitted for some national Reference Frames (those having only
+        one implemented national projected coordinate system).
+        
+        ITRF and ETRF require both lat and lon to be specified, and EUREF-DK94 require lon to be specified."""
+
+        return CRS.from_epsg(self.proj_epsg(lat=lat,lon=lon))
+    
+    def ecef_to_geo(self, *coordinates: float|np.ndarray|tuple[float|np.ndarray, ...]) -> tuple[float|np.ndarray, ...]:
+        """Transforms ECEF coordinates to geodetic (lon, lat, h) in this Reference Frame"""
+        return Transformer.from_crs(f"EPSG:{self.ecef_epsg}", f"EPSG:{self.llh_epsg}", always_xy=True).transform(*coordinates)
+    
+    def geo_to_ecef(self, *coordinates: float|np.ndarray|tuple[float|np.ndarray, ...]) -> tuple[float|np.ndarray, ...]:
+        """Transforms geodetic (lon, lat, h) coordinates to ECEF in this Reference Frame"""
+        return Transformer.from_crs(f"EPSG:{self.llh_epsg}", f"EPSG:{self.ecef_epsg}", always_xy=True).transform(*coordinates)
+    
+    def proj(self, lat: np.ndarray|float, lon: np.ndarray|float) -> tuple[np.ndarray|float, np.ndarray|float]:
+        """Projects latitude/longitude pairs to the projected map coordinates in this Reference Frame. All points
+        are assumed to be in the same projected coordinate zone, matching those of the first coordinate pair."""
+    
+        ref_lat = np.asarray(lat)[0]
+        ref_lon = np.asarray(lon)[0]
+
+        return Transformer.from_crs(f"EPSG:{self.geo_epsg}", f"EPSG:{self.proj_epsg(lat=ref_lat, lon=ref_lon)}", always_xy=True).transform(lon, lat)
+
+DeltaPosType = TypeVar('DeltaPosType', bound='DeltaPos')
 class DeltaPos:
-    __slots__ = ("_coords")
+    __slots__ = ("_coords",)
     _coords: npt.NDArray[np.floating]           # 3D ENU coordinates [m], shape (n,3)
 
-    def __init__(self, *coordinates: float|npt.NDArray[np.floating]|tuple[float|np.NDArray[np.floating], ...], east: float|npt.NDArray[np.floating] = 0., north: float|npt.NDArray[np.floating] = 0., up: float|npt.NDArray[np.floating] = 0.):
+    def __new__(cls: Type[DeltaPosType], *coordinates, **kwargs) -> DeltaPosType:
+            if coordinates:
+                first = coordinates[0]
+                if isinstance(first, cls):
+                    return first
+            return super().__new__(cls)
+
+    def __init__(self, *coordinates: float|npt.NDArray[np.floating]|tuple[float|np.NDArray[np.floating], ...], east: float|npt.NDArray[np.floating] = 0., north: float|npt.NDArray[np.floating] = 0., up: float|npt.NDArray[np.floating] = 0.) -> DeltaPos:
+        """Initiates DeltaPos: a 3D offset represented by East, North and Up (ENU) coordinates, relative some position.
+        The coordinates accepts iterable objects.
+
+        DeltaPos objects can be added/subtracted to each other or to Pos objects (numpy broadcasting applies).
+        
+        Pos is a Reference Frame aware position representation, and DeltaPos represents a position offset, while ReferenceFrame
+        handles the Reference Frames (parallels datetime objects datetime, timedelta, timezone but with array representation
+        instead of scalar)."""
         if coordinates:
             # Get coordinates
             if len(coordinates) == 1:
                 coordinates = coordinates[0]
 
             # Return DeltaPos object if one is passed
-            if isinstance(coordinates, DeltaPos):
-                self = coordinates
-
-            # Ensure coordinates is an array
-            coordinates: np.ndarray = np.asarray(coordinates, dtype=float)
+            if isinstance(coordinates[0], DeltaPos):
+                return
 
             # Validate dimensions
-            if coordinates.ndim == 1:
-                if coordinates.size != 3:
-                    raise ValueError(f"Expected 3 coordinates, received {len(coordinates)}: {coordinates}")
-                coordinates = coordinates.reshape(-1, 3)
-            if coordinates.ndim == 2:
-                if coordinates.shape[1] !=3:
-                    raise ValueError(f"Expected 3 coordinates, received {len(coordinates)}: {(*coordinates,)}")
-            else:
-                raise ValueError("Incorrectly formatted coordinates")
+            if isinstance(coordinates, np.ndarray):
+                if coordinates.ndim == 1:
+                    if coordinates.size != 3:
+                        raise ValueError(f"Expected 3 coordinates, received {len(coordinates)}: {coordinates}")
+                    coordinates = coordinates.reshape(-1, 3)
+                if coordinates.ndim == 2:
+                    if coordinates.shape[1] !=3:
+                        raise ValueError(f"Expected 3 coordinates, received {len(coordinates)}: {(*coordinates,)}")
+                else:
+                    raise ValueError("Incorrectly formatted coordinates")
+            elif len(coordinates) == 3:
+                coordinates = np.array(coordinates, dtype=float).T
+                if coordinates.ndim == 1:
+                    coordinates = coordinates.reshape(-1, 3)
 
             self._coords = coordinates
         else:
@@ -68,18 +326,32 @@ class DeltaPos:
     def coords(self) -> npt.NDArray[np.floating]:
         return self._coords
     
-    def norm(self, horizontal: bool = False, vertical: bool = False) -> npt.NDArray[np.floating]:
+    @property
+    def azimuth(self) -> Angles:
+        """Returns array with azimuth angle"""
+        return Angles(np.atan2(self.east, self.north))
+    
+    def norm(self, horizontal: bool = False, vertical: bool = False) -> np.floating|npt.NDArray[np.floating]:
         if vertical:
             return np.abs(self.up)
         i = 2 if horizontal else 3
-        return np.sqrt((self.coords[:,0:i]**2).sum(axis=1).squeeze())
+        return np.sqrt((self.coords[:,0:i]**2).sum(axis=1))
     
+    def mean(self, dtype: type = float, out: None = None) -> DeltaPos:
+        """Returns DeltaPos object which is mean of current."""
+        return DeltaPos(self.coords.mean(axis=0, dtype=dtype, out=out))
+
     def __len__(self) -> int:
         """Number of points"""
         return self.coords.shape[0]
         
-    def __copy__(self) -> Pos:
+    def copy(self) -> Pos:
         return DeltaPos(self.coords.copy())
+    
+    def join(self, other: DeltaPos|npt.ArrayLike) -> None:
+        """Serializes the other object as a DeltaPos object and joins it to the current."""
+        other = DeltaPos(other)
+        self._coords = np.vstack((self._coords, other.coords))
     
     def __iter__(self) -> Iterator[npt.NDArray[np.floating]]:
         """Iterates over ENU coordinates"""
@@ -114,36 +386,90 @@ class DeltaPos:
     
     def __add__(self, other: object) -> DeltaPos|Pos:
         if isinstance(other, Pos):
-            return Pos(other.coords + (other.enu_rotation.transpose(axes=(0,2,1)) @ self.coords[..., None]).squeeze(), epoch=other.t.copy(), frame=other.frame)
-        if isinstance(other, DeltaPos):
-            return DeltaPos(self.coords.copy() + other.coords.copy())
+            return Pos(other.coords + (np.transpose(other.enu_rotation, axes=(0,2,1)) @ self.coords[..., None]).squeeze(), epoch=other.t.copy(), frame=other.frame)
+        try:
+            other = DeltaPos(other)
+        except:
+            return NotImplemented
+        return DeltaPos(self.coords + other.coords)
+        
+    def __radd__(self, other: object) -> DeltaPos|Pos:
+        if isinstance(other, Pos):
+            return Pos(other.coords + (np.transpose(other.enu_rotation, axes=(0,2,1)) @ self.coords[..., None]).squeeze(), epoch=other.t.copy(), frame=other.frame)
+        try:
+            other = DeltaPos(other)            
+        except:
+            return NotImplemented
+        return DeltaPos(self.coords + other.coords)
+
+    def __sub__(self, other: object) -> DeltaPos:
+        try:
+            other = DeltaPos(other)
+        except:
+            return NotImplemented
+        return DeltaPos(self.coords - other.coords)
+    
+    def __rsub__(self, other: object) -> DeltaPos:
+        try:
+            other = DeltaPos(other)
+        except:
+            return NotImplemented
+        return DeltaPos(other.coords - self.coords)
+    
+    def __mul__(self, other: object) -> DeltaPos:
+        other = np.asarray(other, dtype=float)
+        if other.ndim == 1 and other.size == len(self):
+            other = other.reshape(len(self), -1)
+        if other.ndim == 0 or (other.ndim == 2 and len(other) == len(self) and (other.shape[1] == 3 or other.shape[1] == 1)):
+            return DeltaPos(other * self.coords)
         return NotImplemented
     
-    def __sub__(self, other: object) -> npt.NDArray[np.floating]:
-        if isinstance(other, DeltaPos):
-            return DeltaPos(self.coords.copy() - other.coords.copy())
+    def __rmul__(self, other: object) -> DeltaPos:
+        other = np.asarray(other, dtype=float)
+        if other.ndim == 1 and other.size == len(self):
+            other = other.reshape(len(self), -1)
+        if other.ndim == 0 or (other.ndim == 2 and len(other) == len(self) and (other.shape[1] == 3 or other.shape[1] == 1)):
+            return DeltaPos(other * self.coords)
         return NotImplemented
     
+    def __getitem__(self, idx: IndexType) -> DeltaPos:
+        """Returns DeltaPos object with a set of coordinates determined by idx."""
+        return DeltaPos(self.coords[idx])
+
+    def __setitem__(self, idx: IndexType, value: DeltaPos|npt.NDArray[np.floating]):
+        obj = DeltaPos(value)
+        if len(obj) == len(self[idx]):
+            self._coords = obj.coords
+        else:
+            raise ValueError(f"The value must match the idx, and be serializable as a DeltaPos object, not {value}")
+
     def __str__(self) -> str:
-        return f"{self.norm():.3f} m"
+        if len(self) == 1:
+            distance = round(self.norm()[0])
+        else:
+            distance = self.norm().round(3)
+        return f"{distance} m"
     
     def __repr__(self) -> str:
-        return f"Position difference: {repr(self.coords)}"
-    
+        return f"DeltaPos({self.coords}, {f'shape={self.coords.shape}, ' if len(self) > 333 else ''})"
+
+PosType = TypeVar('PosType', bound='Pos')
 class Pos:
-    __slots__ = ("frame", "epoch", "_time", "_ecef", "_llh", "_map", "_enu")
-    frame: str                                  # Reference frame
-    epoch: float                                # Nominal epoch (decimal year)
-    _time: npt.NDArray[np.floating]             # Time coordinate [decimal year], shape (n,)
+    __slots__ = ("frame", "_epoch", "_time", "_ecef", "_llh", "_map", "_enu")
+    frame: ReferenceFrame                       # Reference frame
+    _epoch: np.datetime64                       # Nominal epoch
+    _time: npt.NDArray[np.timedelta64]          # Time coordinate offset from _epoch, shape (n,)
     _ecef: npt.NDArray[np.floating]             # 3D ECEF coordinate array [X, Y, Z], shape (n, 3)
     _llh: npt.NDArray[np.floating]              # 3D geodetic coordinate array [lon, lat, h], shape (n, 3)
     _map: npt.NDArray[np.floating]              # 2D projected map coordinate array [Easting, Northing], shape (n, 2)
     _enu: npt.NDArray[np.floating]              # Transformation matrices from ECEF to ENU coordinates, shape (n, 3, 3)
 
-    def __new__(cls, *args, frame: str|None = None, **kwargs) -> Pos:
+    def __new__(cls: Type[PosType], *args, **kwargs) -> PosType:
+        if args and isinstance(args[0], Pos):
+            return args[0]
         obj = super().__new__(cls)
         obj.frame = None
-        obj.epoch = None
+        obj._epoch = None
         obj._time = None
         obj._ecef = None
         obj._llh = None
@@ -152,232 +478,161 @@ class Pos:
         return obj
 
     # Standard init: ECEF coordinates
-    def __init__(self, *coordinates: float|np.ndarray|tuple[float|np.ndarray, ...], epoch: float|datetime|np.datetime64|npt.NDArray[np.datetime64|np.floating]|None = None, frame: str = None) -> Pos:
-        """Initiates coordinates in ECEF. The 4th dimension (time) is specified as a 4th coordinate (decimal year),
-        or via the epoch parameter. If a scalar epoch is provided for an array of coordinates, all coordinates are assumed to
-        belong to the same epoch (generally slightly less accurate).
+    def __init__(self, *coordinates: npt.ArrayLike[np.floating], epoch: float|datetime|np.datetime64|str|None = None, frame: str|ReferenceFrame|None = None, geodetic: bool = False, lat_first: bool = False) -> Pos:
+        """Initiates Pos in ECEF coordinates by default; the geodetic parameter can be set to True to initiate in LLH coordinates
+        (default is longitude first, use lat_first to set latitude first). The 4th dimension (time) is specified as a 4th coordinate
+        (datetime, np.datetime64, datetime str or decimal year), or as a time offset (timedelta, np.timedelta64, duration string or
+        number of seconds) from the  epoch parameter (datetime, np.datetime64, datetime string or decimal year). If no time coordinate
+        is provided, the epoch must be specified and the time offset is set to 0 for all coordinate sets. Coordinates (but not epoch)
+        accepts ArrayLike objects.
         
-        If the Reference Frame is not specified via the frame parameter, defaults to the TARGET_FRAME from Settings."""
+        If the Reference Frame is not specified via the frame parameter, defaults to the most recent ITRF realization.
+        
+        Pos is a Reference Frame aware position representation, and DeltaPos represents a position offset, while ReferenceFrame
+        handles the Reference Frames (parallels datetime objects datetime, timedelta, timezone but with array representation
+        instead of scalar)."""
 
         # Get coordinates
         if len(coordinates) == 1:
             coordinates = coordinates[0]
 
-        # Return Coordinate object if one is passed
+                # Return Coordinate object if one is passed
+        
         if isinstance(coordinates, Pos):
-            self = coordinates
-            return
-
+            return # Skip initiation
+        
         # Resolve and validate Reference Frame
-        self.frame = Settings().resolve_frame(frame)
-
-        # Ensure coordinates is an array
-        if not isinstance(coordinates, np.ndarray):
-            coordinates = np.array(coordinates, dtype=float).T
-
-        # Validate dimensions
-        if coordinates.ndim == 1:
-            if coordinates.size == 3:
-                coordinates = coordinates.reshape(-1, 3)
-            elif coordinates.size == 4:
-                coordinates = coordinates.reshape(-1, 4)
-            else:
-                raise ValueError(f"Expected 3 or 4 coordinates, received {coordinates.size}: {coordinates}")
-        if coordinates.ndim == 2:
-            if coordinates.shape[1] !=3 and coordinates.shape[1] !=4:
-                raise ValueError(f"Expected 3 or 4 coordinates, received {coordinates.shape[1]}: {(*coordinates,)}")
+        if frame is None:
+            self.frame = ReferenceFrame("ITRF")
         else:
-            raise ValueError("Incorrectly formatted coordinates")
+            self.frame = ReferenceFrame(frame)
 
-        # 3D coordinates      
-        if coordinates.shape[1] == 3:
-            # Verify that epoch was specified
-            if epoch is None:
-                raise ValueError("Specify a valid epoch, either as a 4th coordinate (decimal year) or via the epoch parameter.")
-            
-            # Store 3D coordinates
+        # Prepare coordinates and verify spatial coordinates
+        t = None
+        if isinstance(coordinates, np.ndarray):
+            # Validate dimensions
+            if coordinates.ndim == 1:
+                if coordinates.size != 3 and coordinates.size != 4:
+                    raise ValueError(f"Expected 3 or 4 coordinates, received {coordinates.size}: {(*coordinates,)}")
+
+                if coordinates.size == 4:
+                    # Time coordinate
+                    t = coordinates[3]
+                
+                # Spatial coordinates 
+                coordinates = coordinates[0:3].reshape(-1,3)
+
+            if coordinates.ndim == 2:
+                if coordinates.shape[1] !=3 and coordinates.shape[1] !=4:
+                    raise ValueError(f"Expected 3 or 4 coordinates, received {coordinates.shape[1]}: {(*coordinates.T,)}")
+                
+                if coordinates.shape[1] == 4:
+                    # Time coordinate
+                    t = coordinates[:, 3]
+
+                # Spatial coordinates
+                coordinates = coordinates[:,0:3]
+
+            else:
+                raise ValueError("Incorrectly formatted coordinates")
+        elif len(coordinates) == 3:
+            # Spatial coordinates
+            coordinates = np.array(coordinates, dtype=float).T
+            if coordinates.ndim == 1:
+                coordinates = coordinates.reshape(-1, 3)
+        elif len(coordinates) == 4:
+            # Time coordinate
+            t = coordinates[3]
+
+            # Spatial coordinates
+            coordinates = np.array(coordinates[0:3], dtype=float).T
+            if coordinates.ndim == 1:
+                coordinates = coordinates.reshape(-1, 3)
+
+        # Assign spatial coordinates
+        if geodetic:
+            if lat_first:
+                coordinates = coordinates[:, [1,0,2]]
+            self._llh = coordinates
+        else:
             self._ecef = coordinates
 
-            # Get time coordinate from epoch parameter
-            if isinstance(epoch, datetime):
-                # Normalize to UTC
-                if epoch.tzinfo is None:
-                    epoch = epoch.replace(tzinfo=timezone.utc)
-                else:
-                    epoch = epoch.astimezone(timezone.utc)
-
-                # Convert to decimal year
-                year = epoch.year
-                start_of_year = datetime(year, 1, 1, tzinfo=timezone.utc)
-                end_of_year = datetime(year + 1, 1, 1, tzinfo=timezone.utc)
-                year_length = (end_of_year - start_of_year).total_seconds()
-                seconds_into_year = (epoch - start_of_year).total_seconds()
-
-                self.epoch = year + seconds_into_year / year_length
-            elif isinstance(epoch, np.datetime64):
-                year = epoch.astype('datetime64[Y]').astype(int) + 1970
-                start_of_year = np.datetime64(f'{year}-01-01')
-                end_of_year = np.datetime64(f'{year+1}-01-01')
-                year_length = end_of_year - start_of_year
-                duration_into_year = epoch - start_of_year
-
-                self.epoch = year + float(duration_into_year / year_length)
-            elif isinstance(epoch, float|np.floating):
-                self.epoch = float(epoch)
-            if np.size(epoch) == 1:
-                self._time = np.full_like(self.X, self.epoch)
-            # Time coordinate provided
-            else:
-                # datetime array
-                if isinstance(epoch[0], np.datetime64):
-                    # Convert to decimal year
-                    year = epoch.astype('datetime64[Y]').astype(int) + 1970
-                    start_of_year = np.array([np.datetime64(f'{y}-01-01') for y in year])
-                    end_of_year = np.array([np.datetime64(f'{y+1}-01-01') for y in year])
-                    year_length = end_of_year - start_of_year
-                    duration_into_year = epoch - start_of_year
-
-                    epoch = year + (duration_into_year / year_length).astype('float64')
-                
-                if epoch.size != len(self):
-                    raise ValueError("Please specify a scalar epoch or an array-like object of the same length as the coordinates.")
-                
-                # Store time coordinate
-                self._time = epoch.ravel()
-
-                # Extract nominal epoch
-                self.epoch = np.median(epoch)
-        # 4D coordinates
-        elif coordinates.shape[1] == 4:
-            # Store coordinates
-            self._ecef = coordinates[:, 0:3]
-            self._time = coordinates[:, 3]
-            
-            # Extract nominal epoch
-            self.epoch = np.median(self._time)
-
-    # Non-standard init: LLH coordinates
-    @classmethod
-    def geodetic(cls, *coordinates: float|np.ndarray|tuple[float|np.ndarray, ...], epoch: float|datetime|None = None, frame: str = None, lat_first: bool = False) -> Pos:
-        """Initiates coordinates in Geodetic (lon, lat, h). The 4th dimension (time) is specified as a 4th coordinate (decimal year),
-        or via the epoch parameter. If a scalar epoch is provided for an array of coordinates, all coordinates are assumed to
-        belong to the same epoch (generally slightly less accurate). If lat_first is set to True, takes the coordinates as
-        (lat, lon, h) instead.
+        # Verify epoch and assign
+        if epoch:
+            self._epoch = verify_dt64(epoch)
         
-        If the Reference Frame is not specified via the frame parameter, defaults to the TARGET_FRAME from Settings."""
-        # Initiate empty coordinates
-        self: Pos = cls.__new__(cls)
-
-        # Get coordinates
-        if len(coordinates) == 1:
-            coordinates = coordinates[0]
-
-         # Return Coordinate object if one is passed
-        if isinstance(coordinates, Pos):
-            self = coordinates
-            return
-
-        # Resolve and validate Reference Frame
-        self.frame = Settings().resolve_frame(frame)
-
-        # Ensure coordinates is an array
-        if not isinstance(coordinates, np.ndarray):
-            coordinates = np.array(coordinates, dtype=float).T
+        # Verify time coordinate and assign
+        if t is not None:
+            t = np.asarray(t)
+            if t.size != len(self):
+                raise ValueError(f"Size mismatch: {np.size(t)} time coordinate(s) for {len(self)} points")
+            if t.ndim == 0:
+                # Convert to 1D 
+                t = t.reshape(-1)
+            if t.ndim != 1:
+                raise ValueError(f"Expected 1 dimensional time coordinate, received {t.ndim}: {t}")
         
-
-        # Validate dimensions
-        if coordinates.ndim == 1:
-            if coordinates.size == 3:
-                coordinates = coordinates.reshape(-1, 3)
-            elif coordinates.size == 4:
-                coordinates = coordinates.reshape(-1, 4)
+            # Verify time coordinate
+            if self._epoch:
+                self._time = np.array([verify_td64(ti) for ti in t])
             else:
-                raise ValueError(f"Expected 3 or 4 coordinates, received {coordinates.size}: {coordinates}")
-        if coordinates.ndim == 2:
-            if coordinates.shape[1] !=3 and coordinates.shape[1] !=4:
-                raise ValueError(f"Expected 3 or 4 coordinates, received {coordinates.shape[1]}: {(*coordinates,)}")
+                dt = np.array([verify_dt64(ti) for ti in t])
+                self._epoch = dt[0]
+                self._time = dt - dt[0]
         else:
-            raise ValueError("Incorrectly formatted coordinates")
-
-        # 3D coordinates      
-        if coordinates.shape[1] == 3:
-            # Verify that epoch was specified
-            if epoch is None:
-                raise ValueError("Specify a valid epoch, either as a 4th coordinate (decimal year) or via the epoch parameter.")
-            
-            # Store 3D coordinates
-            self._llh = coordinates
-
-            # Get time coordinate from epoch parameter
-            if isinstance(epoch, datetime):
-                # Normalize to UTC
-                if epoch.tzinfo is None:
-                    epoch = epoch.replace(tzinfo=timezone.utc)
-                else:
-                    epoch = epoch.astimezone(timezone.utc)
-
-                # Convert to decimal year
-                year = epoch.year
-                start_of_year = datetime(year, 1, 1, tzinfo=timezone.utc)
-                end_of_year = datetime(year + 1, 1, 1, tzinfo=timezone.utc)
-                year_length = (end_of_year - start_of_year).total_seconds()
-                seconds_into_year = (epoch - start_of_year).total_seconds()
-
-                self.epoch = year + seconds_into_year / year_length
-            elif isinstance(epoch, np.datetime64):
-                year = epoch.astype('datetime64[Y]').astype(int) + 1970
-                start_of_year = np.datetime64(f'{year}-01-01')
-                end_of_year = np.datetime64(f'{year+1}-01-01')
-                year_length = end_of_year - start_of_year
-                duration_into_year = epoch - start_of_year
-
-                self.epoch = year + float(duration_into_year / year_length)
-            elif isinstance(epoch, float|np.floating):
-                self.epoch = float(epoch)
-            if np.size(epoch) == 1:
-                self._time = np.full_like(self.X, self.epoch)
-            # Time coordinate
+            if self._epoch:
+                self._time = np.zeros_like(self.X, dtype='timedelta64[us]')
             else:
-                # datetime array
-                if isinstance(epoch[0], np.datetime64):
-                    # Convert to decimal year
-                    year = epoch.astype('datetime64[Y]').astype(int) + 1970
-                    start_of_year = np.array([np.datetime64(f'{y}-01-01') for y in year])
-                    end_of_year = np.array([np.datetime64(f'{y+1}-01-01') for y in year])
-                    year_length = end_of_year - start_of_year
-                    duration_into_year = epoch - start_of_year
-
-                    epoch = year + (duration_into_year / year_length).astype('float64')
-                
-                if epoch.size != len(self):
-                    raise ValueError("Please specify a scalar epoch or an array-like object of the same length as the coordinates.")
-                # Store time coordinate
-                self._time = epoch.ravel()
-
-                # Extract nominal epoch
-                self.epoch = np.median(epoch)
-        # 4D coordinates
-        elif coordinates.shape[1] == 4:
-            # Store coordinates
-            self._llh = coordinates[:, 0:3]
-            self._time = coordinates[:, 3]
-            
-            # Extract nominal epoch
-            self.epoch = np.median(self._time)
-
-        if lat_first:
-            self._llh = self._llh[:, [1, 0, 2]]
-
-        return self
+                raise ValueError("Time coordinate must be specified, either as a 4th dimension or as a static epoch.")
+        
+    @property
+    def epoch(self) -> datetime:
+        return self._epoch.astype(datetime)
     
+    @property
+    def t(self) -> npt.NDArray[np.float64]:
+        """Time coordinate in seconds offset"""
+        return self._time.copy().astype(float) * 1E-6
+    
+    def t_str(self) -> npt.NDArray[np.str_]:
+        """Returns string array with t coordinate in '[d day[s], ]hh:mm:ss[.ffffff]' format"""
+        return np.array([str(ti.astype(timedelta)) for ti in self._time])
+    
+    @property
+    def dt(self) -> npt.NDArray[np.datetime64]:
+        return self._epoch + self._time
+    
+    @property
+    def years(self) -> npt.NDArray[np.float64]:
+        dt_us = self.dt.astype('datetime64[us]') # Normalize type to microseconds for GNSS 
+        years = self.dt.astype('datetime64[Y]').astype(int)
+        
+        # Build start/end-of-year as day-based boundaries (to avoid "average year" lengths)
+        start_D = years.astype('datetime64[Y]').astype('datetime64[D]')
+        end_D   = (years + 1).astype('datetime64[Y]').astype('datetime64[D]')
+
+        # Convert to microseconds for exact duration arithmetic
+        start_us = start_D.astype('datetime64[us]')
+        end_us   = end_D.astype('datetime64[us]')
+
+        # Elapsed and total year length in integer microseconds
+        elapsed = (dt_us - start_us).astype('timedelta64[ns]').astype('int64')
+        yearlen = (end_us - start_us).astype('timedelta64[ns]').astype('int64')
+
+        # Fractional year and final decimal year
+        years = years + elapsed / yearlen
+        years = years.astype('float64')
+
+        return years
+
     @property
     def coords(self) -> npt.NDArray[np.floating]:
         """ECEF coordinates"""
         if self._ecef is None:
             if self._llh is None:
                 raise ValueError("coordinates defined in neither ECEF nor Geodetic system")
-            self._ecef = np.vstack(geo_to_ecef(self._llh.T, rf=self.frame)).T
-        return self._ecef
+            self._ecef = np.vstack(self.frame.geo_to_ecef(*self.igeo())).T
+        return self._ecef.copy()
     
     @property
     def geo(self) -> npt.NDArray[np.floating]:
@@ -385,15 +640,19 @@ class Pos:
         if self._llh is None:
             if self._ecef is None:
                 raise ValueError("Coordinates defined in neither ECEF nor Geodetic system")
-            self._llh = np.vstack(ecef_to_geo(self._ecef.T, rf=self.frame)).T
-        return self._llh
+            self._llh = np.vstack(self.frame.ecef_to_geo(*self)).T
+        return self._llh.copy()
+    
+    def igeo(self) -> Iterator[npt.NDArray[np.floating]]:
+        """Iterator over geodetic coordinates"""
+        return iter(self.geo.T)
     
     @property
-    def map(self) -> npt.NDArray[np.floating]:
+    def proj(self) -> npt.NDArray[np.floating]:
         """Projected map coordinates"""
         if self._map is None:
-            self._map = np.vstack(geo_to_map(lat=self.lat, lon=self.lon, rf=self.frame)).T
-        return self._map
+            self._map = np.vstack(self.frame.proj(lat=self.lat, lon=self.lon)).T
+        return self._map.copy()
     
     @property
     def X(self) -> npt.NDArray[np.floating]:
@@ -436,11 +695,6 @@ class Pos:
         return self.map[:,1]
     
     @property
-    def t(self) -> npt.NDArray[np.floating]:
-        """Time coordinate"""
-        return self._time
-    
-    @property
     def enu_rotation(self) -> npt.NDArray[np.floating]:
         if self._enu is None:
             self._enu = ecef_to_enu(lon=self.lon, lat=self.lat)
@@ -448,8 +702,8 @@ class Pos:
             if self._enu.ndim == 2:
                 self._enu = self._enu.reshape(1,3,3)
 
-        return self._enu
-    
+        return self._enu.copy()
+
     def __len__(self) -> int:
         """Number of points"""
         if self._ecef is not None:
@@ -458,19 +712,19 @@ class Pos:
             return self.lon.size
         raise ValueError("Coordinates defined in neither ECEF nor Geodetic system")
         
-    def __copy__(self) -> Pos:
-        if self._ecef is not None:
-            cp = Pos(self.coords.copy(), epoch=self.t.copy(), frame=self.frame)
-            if self._llh is not None:
-                cp._llh = self._llh.copy()
-        elif self._llh is not None:
-            cp = Pos().geodetic(self.geo.copy(), epoch=self.t.copy(), frame=self.frame)
+    def copy(self, retain_coords: bool = True, retain_geo: bool = True, retain_proj: bool = True, retain_enu: bool = True) -> Pos:
+        if retain_coords and self._ecef is not None:
+            cp = Pos(*self, self.t, epoch=self.epoch, frame=self.frame)
+            if retain_geo and self._llh is not None:
+                cp._llh = self.geo
+        elif retain_geo and self._llh is not None:
+            cp = Pos().geodetic(*self.igeo(), self.t, epoch=self.epoch, frame=self.frame)
         else:
-            raise ValueError("coordinates defined in neither ECEF nor Geodetic system")
-        if self._map is not None:
-            cp._map = self._map.copy()
-        if self._enu is not None:
-            cp._enu = self._enu.copy()
+            raise ValueError("Coordinates defined in neither ECEF nor Geodetic system")
+        if retain_proj and self._map is not None:
+            cp._map = self.proj
+        if retain_enu and self._enu is not None:
+            cp._enu = self.enu_rotation
 
         return cp
     
@@ -493,29 +747,74 @@ class Pos:
         return self.coords == other.coords
     
     def __add__(self, other: object) -> Pos:
-        if isinstance(other, DeltaPos):
-            return Pos(self.coords + (self.enu_rotation.transpose(axes=(0,2,1)) @ other.coords[..., None]).squeeze(), epoch=self.t.copy(), frame=self.frame)
-        return NotImplemented
+        try: 
+            other = DeltaPos(other)
+        except:
+            return NotImplemented
+        return self.make(self.coords + (np.transpose(self.enu_rotation, axes=(0,2,1)) @ other.coords[..., None]).squeeze())
+        
+    def __radd__(self, other: object) -> Pos:
+        try: 
+            other = DeltaPos(other)
+        except:
+            return NotImplemented
+        return self.make(self.coords + (np.transpose(self.enu_rotation, axes=(0,2,1)) @ other.coords[..., None]).squeeze())
     
     def __sub__(self, other: object) -> Pos|DeltaPos:
         if isinstance(other, DeltaPos):
             return Pos(self.coords.copy() - other.coords.copy(), epoch=self.t.copy(), frame=self.frame)
-        if isinstance(other, Pos):
-            return DeltaPos((other.enu_rotation @ (self.coords.copy() - other.reframe(self.frame).coords.copy())[..., None]).squeeze())
-        return NotImplemented
+        try:
+            other = self.make(other)
+        except:
+            return NotImplemented
+        return DeltaPos((other.enu_rotation @ (self.coords.copy() - other.coords.copy())[..., None]).squeeze())
+        
+    def __rsub__(self, other: object) -> DeltaPos:
+        try:
+            other = self.make(other)
+        except:
+            return NotImplemented
+        return DeltaPos((self.enu_rotation @ (other.coords.copy() - self.coords.copy())[..., None]).squeeze())
     
-    def __getitem__(self, idx: int) -> Pos:
-        """Returns Pos object with a single set of coordinates, determined by idx."""
+    def __getitem__(self, idx: IndexType) -> Pos:
+        """Returns Pos object with a set of coordinates determined by idx."""
         if self._ecef is not None:
-            pos = Pos(self.coords[idx].copy(), epoch=self.t[idx], frame=self.frame)
+            pos = Pos(*self.coords[idx].T, self.t[idx], epoch=self.epoch, frame=self.frame)
             if self._llh is not None:
-                pos._llh = self.geo[idx].reshape((1,3)).copy()
+                geo = self.geo[idx]
+                if geo.ndim == 1:
+                    pos._llh = geo.reshape((1, 3))
+                elif geo.ndim == 2:
+                    pos._llh = geo
         elif self._llh is not None:
-            pos = Pos.geodetic(self.geo[idx].copy(), epoch=self.t[idx], frame=self.frame)
+            pos = Pos(*self.geo[idx].T, self.t, epoch=self.epoch, frame=self.frame, geodetic=True)
         if self._map is not None:
-            pos._map = self.map[idx].reshape((1,3)).copy()
+            map = self.map[idx]
+            if map.ndim == 1:
+                pos._map = map.reshape((1,3))
+            if map.ndim == 2:
+                pos._map = map
         if self._enu is not None:
-            pos._enu = self.enu_rotation[idx].reshape((1,3,3)).copy()
+            enu_rotation = self.enu_rotation[idx]
+            if enu_rotation.ndim == 1:
+                pos._enu = enu_rotation.reshape((1,3,3))
+            if enu_rotation.ndim == 2:
+                pos._enu = enu_rotation
+        return pos
+
+    def __setitem__(self, idx: IndexType, value: Pos|npt.NDArray[np.floating]):
+        pos = self.make(value)
+        if len(pos) == len(self[idx]):
+            if self._ecef is not None:
+                self._ecef[idx] = pos.coords
+            if self._llh is not None:
+                self._llh[idx] = pos.geo
+            if self._map is not None:
+                self._map[idx] = pos.map
+            if self._enu is not None:
+                self._enu[idx] = pos.enu_rotation
+        else:
+            raise ValueError(f"The value must match the idx, and be serializable as a Pos object, not {value}")
 
     def __bool__(self) -> bool:
         if self._ecef is None and self._llh is None:
@@ -524,30 +823,68 @@ class Pos:
     
     def __str__(self) -> str:
         if self:
-            return f"Position with {len(self)} points: {str(self.geo)}"
-        else:
-            return "Empty Position"
-        
+            return str(self.geo)
+        return "Empty Position"
+    
     def __repr__(self) -> str:
-        return f"Position object ({self.frame}): coords = {str(self.coords)}"
+        if self:
+            return f"Pos({self.coords}, {f'shape={self.coords.shape}, ' if len(self) > 333 else ''}frame=({self.frame}), epoch={self.epoch})"
+        return "Pos(None)"
 
+    def make(self, obj: Pos|npt.ArrayLike[np.floating], geodetic: bool = False, lat_first: bool = True) -> Pos:
+        """Returns the object as a Pos object if possible, in the same reference frame."""
+        time = False
+        if isinstance(obj, Pos):
+            return obj.reframe(self.frame) # Skip initiation
+        elif isinstance(obj, np.ndarray):
+            # Validate dimensions
+            if obj.ndim == 1:
+                if obj.size != 3 and obj.size != 4:
+                    raise ValueError(f"Expected 3 or 4 coordinates, received {obj.size}: {obj}")
+
+                if obj.size == 4:
+                    time = True
+
+            elif obj.ndim == 2:
+                if obj.shape[1] !=3 and obj.shape[1] !=4:
+                    raise ValueError(f"Expected 3 or 4 coordinates, received {obj.shape[1]}: {obj}")
+                
+                if obj.shape[1] == 4:
+                    # Time coordinate
+                    time = True
+
+            else:
+                raise ValueError("Incorrectly formatted coordinates")
+            
+        elif len(obj) != 3 and len(obj) != 4:
+            raise ValueError(f"Expected 3 or 4 coordinates, received {len(obj)}: {obj}")
+        elif len(obj) == 4:
+            time = True
+        # Initialize
+        if time:
+            return Pos(obj, frame=self.frame, geodetic=geodetic, lat_first=lat_first)
+        else:
+            return Pos(obj, epoch=self._epoch, frame=self.frame, geodetic=geodetic, lat_first=lat_first)
+    
     def reframe(self, frame: str) -> Pos:
         """Changes the Reference Frame of the coordinates to the one specified"""
         if frame == self.frame:
             return self
-        self._ecef = np.vstack(change_rf(self.frame, frame, *self, self.t)).T
-        self.frame = frame
+        self._ecef = np.vstack(self.frame.as_frame(frame, *self, self.years)).T
+        self.frame = ReferenceFrame(frame)
         # Clear other coordinate systems 
         self._llh = None
         self._map = None
         self._enu = None
         return self
 
-    def diff(self, *coordinates: Pos|float|np.ndarray|tuple[float|np.ndarray, ...]) -> DeltaPos:
+    def diff(self, *coordinates: Pos|npt.ArrayLike[np.floating]) -> DeltaPos:
         """Returns the input ECEF coordinates in the local ENU coordinates of this object.
         
         Returns DeltaPos object"""
-        return Pos(*coordinates, epoch=self.t.copy(), frame=self.frame) - self
+        if len(coordinates) == 1:
+            coordinates = coordinates[0]
+        return self.make(coordinates) - self
     
     def add(self, *coordinates: DeltaPos|float|np.ndarray|tuple[float|np.ndarray, ...]) -> Pos:
         """Returns the input ENU coordinates, assumed to be in the local frame of this object,
@@ -556,6 +893,24 @@ class Pos:
         Returns Pos object"""
         return self + DeltaPos(*coordinates)
 
+    def mean(self, dtype: type = float, out: None = None) -> Pos:
+        """Returns Pos object which is the arithmethic center of current object."""
+        return self.make(self.coords.mean(axis=0, dtype=dtype, out=out))
+    
+    def join(self, other: Pos|npt.ArrayLike[np.floating]) -> None:
+        """Serializes the other object as a Pos object and joins it to the current."""
+        other = self.make(other)
+        if self._ecef is not None:
+            self._ecef = np.vstack((self._ecef, other.coords))
+        if self._llh is not None:
+            self._llh = np.vstack((self._llh, other.geo))
+        if self._map is not None:
+            self._map = np.vstack((self._llh, other.proj))
+        if self._enu is not None:
+            self._enu = np.vstack((self._enu, other.enu_rotation))
+        time_diff = other._epoch - self._epoch
+        self._time = np.hstack((self._time, other._time + time_diff))
+    
 # Realizations
 def _itrf20_to_etrf14(*coordinates: float|np.ndarray|tuple[float|np.ndarray, ...], epoch: float|datetime|None = None) -> tuple[float|np.ndarray, ...]:
     """Transforms between ECEF coordinates in ITRF2020 realization to ETRF2014. This is the first step in the NKG2020 transformation
@@ -1703,146 +2058,14 @@ def _noref_to_etrf20(*coordinates: float|np.ndarray|tuple[float|np.ndarray, ...]
     
     return coordinates
 
-def change_rf(source_rf: str, target_rf: str, *coordinates: float|np.ndarray|tuple[float|np.ndarray, ...], epoch: float|datetime|None = None) -> tuple[float|np.ndarray, ...]:
-    """Changes the reference frame of the coordinates. The time coordinate can be passed in the same format as the spatial coordinates (decimal year), or
-    as a separate parameter (accepts datetime objects, UTC timezone). Implemented reference frames are:
-    - ITRF: alias for latest ITRF realization (ITRF2020)
-    - ITRF2020
-    - ETRF: alias for latest ETRF realization (ETRF2020)
-    - ETRF2020
-    - SWEREF: alias for SWEREF99
-    - SWEREF99
-    - FINREF: alias for EUREF-FIN
-    - EUREF-FIN
-    - DKREF: alias for EUREF-DK94
-    - EUREF-DK94
-    - LITREF: alias for LKS-94
-    - LKS-94
-    - LATREF: alias for LKS-92
-    - LKS-92
-    - ESTREF: alias for EUREF-EST97
-    - EUREF-EST97
-    - NOREF: alias for EUREF89
-    - EUREF89
-    
-    The time coordinate can be passed in the same format as the spatial coordinates (decimal year), or
-    as a separate parameter (accepts datetime objects, UTC timezone).
-    
-    Note that national realizations cannot be changed into eachother.
-    
-    Returns 3D coordinates"""
-
-    st = Settings()
-    source_rf = st.resolve_frame(source_rf)
-    target_rf = st.resolve_frame(target_rf)
-    if source_rf == target_rf:
-        return coordinates[0:3]
-    
-    transformer_map = {
-        "ITRF2020": {
-            "ETRF2020": _itrf20_to_etrf20,
-            "SWEREF99": _itrf20_to_sweref,
-            "EUREF-FIN": _itrf20_to_finref,
-            "EUREF-DK94": _itrf20_to_dkref,
-            "LKS-94": _itrf20_to_litref,
-            "LKS-92": _itrf20_to_latref,
-            "EUREF-EST97": _itrf20_to_estref,
-            "EUREF89": _itrf20_to_noref,
-        },
-        "ETRF2020": {
-            "ITRF2020": _etrf20_to_itrf20,
-            "SWERFEF99": _etrf20_to_sweref,
-            "EUREF-FIN": _etrf20_to_finref,
-            "EUREF-DK94": _etrf20_to_dkref,
-            "LKS-94": _etrf20_to_litref,
-            "LKS-92": _etrf20_to_latref,
-            "EUREF-EST97": _etrf20_to_estref,
-            "EUREF89": _etrf20_to_noref,
-        },
-        "SWEREF99": {
-            "ITRF2020": _sweref_to_itrf20,
-            "ETRF2020": _sweref_to_etrf20
-        },
-        "EUREF-FIN": {
-            "ITRF2020": _finref_to_etrf20,
-            "ETRF2020": _finref_to_etrf20
-        },
-        "EUREF-DK94": {
-            "ITRF2020": _dkref_to_itrf20,
-            "ETRF2020": _dkref_to_etrf20
-        },
-        "LKS-94": {
-            "ITRF2020": _litref_to_itrf20,
-            "ETRF2020": _litref_to_etrf20
-        },
-        "LKS-92": {
-            "ITRF2020": _latref_to_itrf20,
-            "ETRF2020": _latref_to_etrf20
-        },
-        "EUREF-EST97": {
-            "ITRF2020": _estref_to_itrf20,
-            "ETRF2020": _estref_to_etrf20
-        },
-        "EUREF89": {
-            "ITRF2020": _noref_to_itrf20,
-            "ETRF2020": _noref_to_etrf20
-        }
-    }
-
-    return transformer_map[source_rf][target_rf](*coordinates, epoch=epoch)[0:3]
-
-# coordinates
-def ecef_to_geo(*coordinates: float|np.ndarray|tuple[float|np.ndarray, ...], rf: str = None) -> tuple[float|np.ndarray, ...]:
-    """Transforms ECEF coordinates to geodetic. The reference frame can be specified with the rf parameter.
-    If not specified it will default to the REFERENCE_FRAME: TARGET in the Settings."""
-    if len(coordinates) == 1:
-        coordinates = coordinates[0]
-    if not len(coordinates) == 3:
-        raise ValueError(f"Expected 3 coordinates, received {len(coordinates)}: {coordinates}")
-
-    rf = Settings().resolve_frame(rf)
-
-    transformer_map = { #[source_crs, target_crs]
-        "ITRF2020": ["EPSG:9988", "EPSG:9989"],
-        "ETRF2020": ["EPSG:10569", "EPSG:10570"],
-        "SWEREF99": ["EPSG:7928", "EPSG:7929"],
-        "EUREF-FIN": ["EPSG:7926", "EPSG:7927"],
-        "EUREF-DK94": ["EPSG:7920", "EPSG:7921"],
-        "EUREF-EST97": ["EPSG:7926", "EPSG:7927"],
-        "LKS-94": ["EPSG:7930", "EPSG:7931"],
-        "LKS-92": ["EPSG:7914", "EPSG:7915"],
-        "EUREF89": ["EPSG:7922", "EPSG:7923"]
-    }
-    return Transformer.from_crs(*transformer_map[rf], always_xy=True).transform(*coordinates)
-
-def geo_to_ecef(*coordinates: float|np.ndarray|tuple[float|np.ndarray, ...], rf: str = None) -> tuple[float|np.ndarray, ...]:
-    """Transforms geodetic coordinates to ECEF."""
-    if len(coordinates) == 1:
-        coordinates = coordinates[0]
-    if not len(coordinates) == 3:
-        raise ValueError(f"Expected 3 coordinates, received {len(coordinates)}: {coordinates}")
-    
-    rf = Settings().resolve_frame(rf)
-
-    transformer_map = { #[source_crs, target_crs]
-        "ITRF2020": ["EPSG:9989", "EPSG:9988"],
-        "ETRF2020": ["EPSG:10570", "EPSG:10569"],
-        "SWEREF99": ["EPSG:7929", "EPSG:7928"],
-        "EUREF-FIN": ["EPSG:7927", "EPSG:7926"],
-        "EUREF-DK94": ["EPSG:7921", "EPSG:7920"],
-        "EUREF-EST97": ["EPSG:7927", "EPSG:7926"],
-        "LKS-94": ["EPSG:7931", "EPSG:7930"],
-        "LKS-92": ["EPSG:7915", "EPSG:7914"],
-        "EUREF89": ["EPSG:7923", "EPSG:7922"]
-    }
-
-    return Transformer.from_crs(*transformer_map[rf], always_xy=True).transform(*coordinates)
-
+# Projected coordinate zones
 def _iutm(lat: np.ndarray|float, lon: np.ndarray|float) -> tuple[np.ndarray|float, np.ndarray|float]:
     """
     Returns the UTM EPSG code for a given latitude and longitude in ITRS.
     Handles Norway and Svalbard special cases.
     """
+    if lat is None or lon is None:
+        raise ValueError("Determining the UTM Zone requires longitude and latitude to be specified.")
     if not isinstance(lat, np.ndarray):
         lat = np.asarray(lat)
     if not isinstance(lon, np.ndarray):
@@ -1877,6 +2100,8 @@ def _eutm(lat: np.ndarray|float, lon: np.ndarray|float) -> tuple[np.ndarray|floa
     Returns the projected UTM coordinates for a given latitude and longitude in ETRS89
     Handles Norway and Svalbard special cases.
     """
+    if lat is None or lon is None:
+        raise ValueError("Determining the UTM Zone requires longitude and latitude to be specified.")
     if not isinstance(lat, np.ndarray):
         lat = np.asarray(lat)
     if not isinstance(lon, np.ndarray):
@@ -1927,6 +2152,8 @@ def _dktm(lon: float) -> int:
     Returns:
         int: EPSG code for the selected DKTM zone.
     """
+    if lon is None:
+        raise ValueError("Determining the DKTM Zone requires longitude to be specified.")
     if lon < 9.5:
         return 4093  # DKTM1
     elif lon < 10.9:
@@ -1935,44 +2162,8 @@ def _dktm(lon: float) -> int:
         return 4095  # DKTM3
     else:
         return 4096  # DKTM4
-    
-def geo_to_map(lat: np.ndarray|float, lon: np.ndarray|float, rf: str|None = None) -> tuple[np.ndarray|float, np.ndarray|float]:
-    """Transforms from geodetic coordinates to projected map coordinates in the specified Reference Frame.
-    The reference frame can be specified using the rf parameter, and if not specified will default the the
-    REFERENCE_FRAMES: TARGET in the Settings. The projected map coordiantes are dependent on the Reference
-    Frame:
-    - ITRF2020: UTM Zones (326xx, 327xx)
-    - ETRF2020: UTM Zones (258xx)
-    - SWEREF99: SWEREF99 TM
-    - EUREF-FIN: EUREF-FIN / TM35FIN(E,N)
-    - EUREF-DK94: ETRS89 / DKTMX (X in 1-4)
-    - EUREF-EST97: EST97
-    - LKS-94: LKS-94 / Lithuania TM
-    - LKS-92: LKS-92 / Latvia TM"""
-    rf = Settings().resolve_frame(rf)
 
-    match rf: #(source_crs, target_crs)
-        case "ITRF2020":
-            epsg_codes = ("EPSG:9989", f"EPSG:{_iutm(lat=lat, lon=lon)}")
-        case "ETRF2020":
-            epsg_codes = ("EPSG:10570", f"EPSG:{_eutm(lat=lat, lon=lon)}")
-        case "SWEREF99":
-            epsg_codes = ("EPSG:7929", "EPSG:3006")
-        case "EUREF-FIN":
-            epsg_codes = ("EPSG:7927", "EPSG:3067")
-        case "EUREF-DK94": 
-            epsg_codes = ("EPSG:7921", f"EPSG:{_dktm(lon)}")
-        case "EUREF-EST97": 
-            epsg_codes = ("EPSG:7927", "EPSG:3301")
-        case "LKS-94":
-            epsg_codes = ("EPSG:7931", "EPSG:3346")
-        case "LKS-92": 
-            epsg_codes = ("EPSG:7915", "EPSG:3059")
-        case "EUREF89": 
-            epsg_codes = ("EPSG:7923", f"EPSG:{_eutm(lat=lat, lon=lon)}")
-
-    return Transformer.from_crs(*epsg_codes, always_xy=True).transform(lon, lat)
-    
+# ENU rotation from ECEF
 def ecef_to_enu(lon: float|np.ndarray, lat: float|np.ndarray, inverse: bool = False, degrees: bool = True) -> np.ndarray:
     """
     Compute ENU rotation matrices for given longitude(s) and latitude(s).
@@ -2010,3 +2201,4 @@ def ecef_to_enu(lon: float|np.ndarray, lat: float|np.ndarray, inverse: bool = Fa
     if inverse:
         return mats[0].T if n == 1 else np.transpose(mats, axes=(0,2,1))
     return mats[0] if n == 1 else mats
+

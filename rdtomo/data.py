@@ -6,60 +6,90 @@ from contextlib import contextmanager, ExitStack
 from typing import Iterator
 from dataclasses import dataclass
 from typing import KeysView, ValuesView, ItemsView, Any, Iterator
-import numpy as np
 import shutil
 from matplotlib import pyplot as plt
 from os import cpu_count
+from abc import ABC
 
-from .config import Settings
-from .utils import warn, extract_datetime, drop_into_terminal, local
-from .manager import tmp, read_only, DirExistsError, DirNotFoundError
+from .utils import warn, extract_datetime, drop_into_terminal, local, srf
+from .manager import tmp, read_only, DirExistsError, DirNotFoundError, gdl, run
 from .gnss import reachz2rnx, fetch_swepos, extract_rnx_info, station_ppp, ppk, ubx2rnx, splice_sp3, splice_clk, splice_inx, chc2rnx, reach2rnx, generate_mocoref
 from .core import TomoScene, TomoScenes, Scenes, tomoinfo
 from .apperture import SARModel
-from .coords import Pos
+from .position import Pos
+from .trackfinding import trackfinder
 
-#
 # Abstract class that dispatches to DataDir, ProcessingDir, TomoDir or TomoArchive
-class LoadDir(Path):
-    def __new__(cls, *args, data: bool = False, processing: bool = False, tomo: bool = False, **kwargs):
+class LoadDir(Path, ABC):
+    _initialized: bool
 
-        cached = kwargs.pop("cached", False)
-        npar = kwargs.pop("npar", cpu_count())
+    def __new__(cls, *args, data: bool = False, processing: bool = False, tomo: bool = False, archive: bool = False, **kwargs):
         generate = kwargs.pop("generate", False) # LoadDir is intended for loading existing directories by default
         date = kwargs.pop("date", None)
         exist_ok = kwargs.pop("exist_ok", False)
+        scene = kwargs.pop("scene", None)
         scenes = kwargs.pop("scenes", None)
         # Check if type was forced
+        instance = None
+        if sum([data, processing, tomo, archive]) > 1:
+            raise ValueError("A directory can only be of one type.")
         if data:
-            if processing or tomo:
-                raise ValueError(f"A directory cannot at the same time be a Data Directory{' and a Processing Directory' if processing else ''}{' and a Tomogram Directory' if tomo else ''}")
-            return DataDir(*args, **kwargs)
+            instance = super().__new__(DataDir)
         if processing:
-            if tomo:
-                raise ValueError("A directory cannot both be a Processing Directory and a Tomogram Directory")
-            return ProcessingDir(*args, generate=generate, date=date, **kwargs)
+            instance = super().__new__(ProcessingDir)
         if tomo:
-            return TomoScenes.load(*args, cached=cached, npar=npar, **kwargs)
+            instance = super().__new__(TomoDir)
+        if archive:
+            instance = super().__new__(TomoArchive)
 
         # Get path        
         path = Path(*args)
+        if path.is_file():
+            raise FileExistsError(f"{path} is a file")
+        if generate:
+            path.mkdir(exist_ok=True, parents=True)
+        if not path.exists():
+            raise ValueError(f"{path} does not exist")
 
-        # Check if path is .tomo dir
-        if path.suffix == ".tomo" :
-            return TomoDir(*args, cached=cached, npar=npar)
+        if not instance:
+            # Check if path is .tomo dir
+            if path.suffix == ".tomo" :
+                instance = super().__new__(TomoDir)
+            
+            # Check if path contains rawdata folder
+            elif (path / "rawdata").is_dir():
+                instance = super().__new__(ProcessingDir)
+            
+            # Check if path contains .tomo folder(s)
+            elif [d for d in path.glob('*.tomo') if d.is_dir()]:
+                instance = super().__new__(TomoArchive)
+            
+            # Assume Data Directory
+            else:
+                instance = super().__new__(DataDir)
         
-        # Check if path contains rawdata folder
-        elif (path / "rawdata").is_dir():
-            return ProcessingDir(*args, generate=generate, date=date)
+        if isinstance(instance, DataDir):
+            instance.__init__(*args)
         
-        # Check if path contains .tomo folder(s)
-        elif [d for d in path.glob('*.tomo') if d.is_dir()]:
-            return TomoArchive(*args, generate=generate, exist_ok=exist_ok, scenes=scenes)
+        if isinstance(instance, ProcessingDir):
+            instance.__init__(*args, generate=generate, date=date, exist_ok=exist_ok)
+
+        if isinstance(instance, TomoDir):
+            instance.__init__(*args, generate=generate, exist_ok=exist_ok, scene=scene)
+
+        if isinstance(instance, TomoArchive):
+            instance.__init__(*args, generate=generate, exist_ok=exist_ok, scenes=scenes)
         
-        # Assume Data Directory
-        else:
-            return DataDir(*args)
+        instance._initialized = True
+        return instance
+     
+    def __init__(self, *args, **kwargs) -> None:
+        if hasattr(self, '_initialized') and self._initialized:
+            return
+        super().__init__(*args, **kwargs)
+
+    def __truediv__(self, key) -> Path:
+        return Path().__truediv__(key)
 
     @property
     def parent(self) -> Path:
@@ -146,6 +176,16 @@ class DroneData():
             "drone_rnx_sbs": self.drone_rnx_sbs,
         }
     
+    @property
+    def nav_files(self) -> list[Path]:
+        nav_files = []
+        if self.base_nav:
+            nav_files.append(self.base_nav)
+        
+        if self.drone_rnx_files():
+            nav_files.append(self.drone_rnx_nav)
+        return nav_files
+
     def init(self, processing_dir: Path|str, generate: bool = True) -> ProcessingDir:
         processing_dir = ProcessingDir(processing_dir, date=self.timestamp.strftime('%Y%m%d'), generate=generate)
 
@@ -168,6 +208,110 @@ class DroneData():
         
         return processing_dir
     
+    def ppk(self,
+            config: str|Path|None = None,
+            use_precise: bool = True,
+            atx: str|Path|None = None,
+            receiver: str|Path|None = None,
+            elevation_mask: float|None = None,
+            minimal_overlap: timedelta|float = timedelta(minutes=10),
+            download_attempts: int = 3,
+            max_downloads: int = 10,
+            raw: bool = False,
+            unify_input_frames: bool = True,
+        ) -> tuple[Pos|dict]:
+        """Performs PPK processing on data, using the internal config file unless an external
+        one is provided.
+        
+        If use_precise is True and no SP3 file is provided then an attempt is made to download
+        from ESA (number of parallel downloads specified by max_downloads and each file is
+        attempted up to max_retries times). The atx and receiver files can be specified to
+        provide alternative ATX lists (receiver is used only for the receiver). The
+        elevation_mask parameter overrides the elevation mask configuration parameter from
+        the config file if set.
+        
+        The raw parameter can be set to True in order NOT to use internal rd-tomo resources.
+        
+        If unify_input_frames is set to False, the BASE position will be input in whatever
+        Reference Frame it is provided in, otherwise it will be explicitly reframed to ITRF.
+        
+        Returns:
+        - pos: a Pos object with PPK solution for the drone position
+        - result: a dict with the following keys:
+            - "SD": Standard deviation of pos solution in ENU as a DeltaPos object,
+            - "ratio": AR ratio of each point,
+            - "gps_week": GPS week of each point
+            - "gpst": GPST (s) of each point, as seconds into current week
+            - "quality": Q number
+            - "sp3": .SP3 Path or None
+            - "clk": .CLK Path or None
+            - "path": .pos Path or None"""
+        
+        # Ensure sufficient overlap in data
+        if isinstance(minimal_overlap, float):
+            minimal_overlap = timedelta(minutes=minimal_overlap)
+        if self.overlap() < minimal_overlap:
+            raise ValueError(f"Data overlap insufficient: {self.overlap()}")
+        
+        # Prepare out paths
+        if self.container:
+            out_path = self.container / self.drone_rnx_obs.with_suffix(".pos").name
+            download_dir = self.container
+        else:
+            out_path = self.drone_rnx_obs.with_suffix(".pos")
+            download_dir = self.base_obs.resolve().parent
+
+        print(f"base_pos: {self.base_pos} of type {type(self.base_pos)}")
+        # Run PPK
+        return ppk(
+            rover_obs=self.drone_rnx_obs,
+            base_obs=self.base_obs,
+            nav_file=self.nav_files,
+            out_path=out_path,
+            config_file=config,
+            sbs_file = self.drone_rnx_sbs,
+            sp3_file = self.sp3 if use_precise else None,
+            clk_file= self.clk,
+            atx_file=atx,
+            receiver_file=receiver,
+            elevation_mask=elevation_mask,
+            precise=use_precise,
+            mocoref_pos=self.base_pos,
+            mocoref_file=self.mocoref,
+            retain=True,
+            download_dir=download_dir,
+            max_downloads=max_downloads,
+            max_retries=download_attempts,
+            raw=raw,
+            unify_input_frames=unify_input_frames,
+        )
+
+    def imuconv(self) -> Path:
+        """Returns the imu_logger_dat-[...]_ts+00_il_ie_ad.bin file for unimoco. Runs GDL>imuconv
+        on the IMU binary log, if necessary, in order to produce it."""
+
+        target_file = self.drone_imu_bin.resolve().parent / (self.drone_imu_bin.stem + "_ts+00_il_ie_ad.bin")
+        if not target_file.is_file():
+            gdl(["imuconv", self.drone_imu_bin])
+        return target_file
+
+    def unimoco(self, pos_file: str|Path) -> Path:
+        """Returns the radar_logger_dat-[...].mocob file produed by unimoco. Runs unimoco first,
+        if necessary, in order to produce it."""
+
+        target_file = self.drone_radar_bin.with_suffix(".mocob")
+        if not target_file.is_file():
+            run(["unimoco",
+                self.config_gps_imu,
+                self.imuconv(),
+                pos_file,
+                "-saveIntermediate",
+                "1",
+                ">>",
+                self.drone_imu_bin.with_suffix(".tmp")
+            ], capture=False)
+        return target_file
+
     def overlap(self) -> timedelta:
         return min(self.base_end, self.drone_end) - max(self.base_start, self.drone_start)
     
@@ -176,10 +320,12 @@ class DroneData():
         as a nominal epoch."""
         return self.base_start + (self.base_end - self.base_start)/2
     
-    def drone_rnx_files(self) -> tuple[Path|Path|Path]:
+    def drone_rnx_files(self) -> bool:
         if not all((self.drone_rnx_obs, self.drone_rnx_nav, self.drone_rnx_sbs)):
+            if not self.drone_gnss_bin:
+                return False
             self.drone_rnx_obs, self.drone_rnx_nav, self.drone_rnx_sbs = ubx2rnx(self.drone_gnss_bin, obs_file=self.container / self.drone_gnss_bin.with_suffix(".obs").name)
-        return (self.drone_rnx_obs, self.drone_rnx_nav, self.drone_rnx_sbs)
+        return True
             
     def _valid_path(self, path: Any) -> bool:
         return path is None or isinstance(path, Path)
@@ -246,17 +392,13 @@ class DroneData():
         return (key in self.files and bool(self.files[key])) or (key in self.paths())
 
 class DataDir(LoadDir):
-    def __new__(cls, *args) -> DataDir:
-        path = Path(*args)
-        if path.is_file():
-            raise FileExistsError(f"{args[0]} is a file")
-        if not path.exists():
-            raise ValueError(f"{args[0]} does not exist")
-        self = Path.__new__(cls, *args)
-        return self
+    def __new__(cls, *args, **kwargs) -> DataDir:
+        return super().__new__(cls, *args, data=True, **kwargs)
 
     def __init__(self, *args) -> None:
         super().__init__(*args)
+        if hasattr(self, '_initialized') and self._initialized:
+            pass # Subclass specific
 
     # Function to scan a data directory for files and extract what's necessary
     @contextmanager
@@ -289,12 +431,12 @@ class DataDir(LoadDir):
         (3) Drone Radar .bin, .log and .cfg;
         (4) GNSS base station;
         (5) Mocoref data or precise position of GNSS base station; and
-        (6) Data files for PPP and precise mode RTKP post processing.
+        (6) Data files for PPP and precise mode PPK post processing.
         
-        If the GNSS base station file is missing, can fetch files from the nearest Swepos station,
+        If the GNSS base station file is missing, DataDir can fetch files from the nearest Swepos station,
         and can supplement Mocoref data by performing static PPP on the base station.
         Note that the path must point to a directory which contains exactly one set of drone data.
-        For other files, tomosar init will use the first matching file it finds (with an overlap of at least minimal_overlap
+        For other files, DataDir will use the first matching file it finds (with an overlap of at least minimal_overlap
         for the base OBS).
 
         For the GNSS base station a RINEX OBS file is prioritized over other files: HCN files and RTCM3 files are also accepted,
@@ -318,15 +460,15 @@ class DataDir(LoadDir):
             if dt1 < dt2:
                 return dt2 - dt1 == timedelta(seconds=1)
 
-        def from_reachz(archive: Path) -> tuple[tuple[Path, bool], tuple[Path, bool], tuple[float, float, float], datetime, datetime]:
+        def from_reachz(archive: Path) -> tuple[Path, Path, Path, Pos]:
             """Extracts: base_obs, mocoref_file, base_pos, base_start and base_end from a Reach ZIP archive"""
-            obs_data, (base_obs, mocoref_file, _) = reachz2rnx(archive, rnx_file=data.drone_rnx_obs, output_dir=data.container)
+            obs_data, (base_obs, mocoref_file, base_nav) = reachz2rnx(archive, rnx_file=data.drone_rnx_obs, output_dir=data.container)
+            base_pos = obs_data[mocoref_file]
             if use_header:
-                print(f"GNSS base generated from {local(archive, self)}")
+                print(f"Base OBS and NAV generated from {local(archive, self)}")
             else:
-                base_pos = obs_data[mocoref_file]
-                print(f"Mocoref data and GNSS base generated from {local(archive, self)}")
-            return base_obs, mocoref_file, base_pos
+                print(f"Mocoref data and base OBS and NAV generated from {local(archive, self)}")
+            return base_obs, base_nav, mocoref_file, base_pos
 
         if use_swepos and use_ppp:
             warn("Swepos files have an exact header position, will not perform PPP.")
@@ -494,7 +636,8 @@ class DataDir(LoadDir):
                 data.inx = splice_inx(precise_files["INX"], output_dir=data.container)
             
             # Ensure drone RNX files exist
-            data.drone_rnx_files()
+            if not data.drone_rnx_files():
+                raise FileNotFoundError(f"GNSS drone data missing: {data.drone_gnss_bin}")
             
             # Extract timestamps
             data.drone_start, data.drone_end, _, _ = extract_rnx_info(data.drone_rnx_obs)
@@ -572,32 +715,31 @@ class DataDir(LoadDir):
                     for key, files in gnss_files.items():
                         if (base_key is None or base_key == key) and files:
                             base_obs_file = True
-                            if mocoref_data:
-                                match key:
-                                    case "RINEX OBS":
-                                        data.base_obs = files[0]
-                                        print(f"Base OBS located: {local(data.base_obs, self)}")
-                                    case "HCN":
-                                        data.base_obs, _, _ = chc2rnx(files[0], obs_file=data.container / files[0].with_suffix(".obs").name)
-                                        print(f"Base OBS generated from {local(files[0], self)}")
-                                    case "RTCM3":  
-                                        data.base_obs, _, _ = reach2rnx(files[0], obs_file=data.container / files[0].with_suffix(".obs").name, tstart=data.drone_start, tend=data.drone_end)
-                                        print(f"GNSS base generated from {local(files[0], self)}")
-                                    case "Reach ZIP archive":
-                                        # Mocoref data is extracted from the ZIP archive
-                                        mocoref_data_file = None 
-                                        # Extract
-                                        data.base_obs, data.mocoref, data.base_pos = from_reachz(files[0])
-                                data.base_start, data.base_end, header_pos, _ = extract_rnx_info(data.base_obs)
-                                if data.overlap() > minimal_overlap:
-                                    break
-                                print(f"Base OBS {'and mocoref ' if data.mocoref else ''} was discarded because of insufficient overlap with drone flight: {data.overlap()}")
-                                data.base_obs = None
-                                data.mocoref = None
-                                data.base_pos = None
-                                data.base_start = None
-                                data.base_end = None
-                                header_pos = None
+                            match key:
+                                case "RINEX OBS":
+                                    data.base_obs = files[0]
+                                    print(f"Base OBS located: {local(data.base_obs, self)}")
+                                case "HCN":
+                                    data.base_obs, data.base_nav, _ = chc2rnx(files[0], obs_file=data.container / files[0].with_suffix(".obs").name, nav=True)
+                                    print(f"Base OBS and NAV generated from {local(files[0], self)}")
+                                case "RTCM3":  
+                                    data.base_obs, data.base_nav, _ = reach2rnx(files[0], obs_file=data.container / files[0].with_suffix(".obs").name, tstart=data.drone_start, tend=data.drone_end, nav=True)
+                                    print(f"Base OBS and NAV generated from {local(files[0], self)}")
+                                case "Reach ZIP archive":
+                                    # Mocoref data is extracted from the ZIP archive
+                                    mocoref_data_file = None 
+                                    # Extract
+                                    data.base_obs, data.base_nav, data.mocoref, data.base_pos = from_reachz(files[0])
+                            data.base_start, data.base_end, header_pos, _ = extract_rnx_info(data.base_obs)
+                            if data.overlap() > minimal_overlap:
+                                break
+                            print(f"Base OBS {'and mocoref ' if data.mocoref else ''} was discarded because of insufficient overlap with drone flight: {data.overlap()}")
+                            data.base_obs = None
+                            data.mocoref = None
+                            data.base_pos = None
+                            data.base_start = None
+                            data.base_end = None
+                            header_pos = None
                     # Generate mocoref from data file
                     if mocoref_data_file:
                         # Verify that base OBS with sufficient overlap was found
@@ -606,6 +748,7 @@ class DataDir(LoadDir):
                         # Get mocoref data and generate mocoref.moco file if necessary
                         data.base_pos, data.mocoref = generate_mocoref(mocoref_data_file, timestamp=data.base_epoch(), type=mocoref_key, generate=True, line=csv_line, pco_diff=offset, output_dir=data.container)
                         if mocoref_key == "mocoref":
+                            data.mocoref = mocoref_data_file
                             print(f"Mocoref located: {local(mocoref_data_file, self)}")
                         else:
                             print(f"Mocoref data extracted from {mocoref_key} file: {local(mocoref_data_file, self)}")
@@ -616,7 +759,7 @@ class DataDir(LoadDir):
                         i = 0
                         header_pos = None
                         while i < len(gnss_files["Reach ZIP archive"]):
-                            data.base_obs, data.mocoref, data.base_pos  = from_reachz(gnss_files["Reach ZIP archive"][i])
+                            data.base_obs, data.base_nav, data.mocoref, data.base_pos  = from_reachz(gnss_files["Reach ZIP archive"][i])
                             data.base_start, data.base_end, header_pos, _ = extract_rnx_info(data.base_obs)
                             if data.overlap() > minimal_overlap:
                                 break
@@ -760,83 +903,74 @@ class ProcessingDir(LoadDir):
                  "process_config", "config_para", "srtm_para", "cband_vv_para", "lband_hh_para", "lband_hv_para",
                  "pband_hh_para", "cband_inf_para", "pband_inf_para", "lband_vv_para", "lband_vh_para", "pband_hv_para",
                  "pband_vv_para", "pband_vh_para", "processing", "cross"}
-
-    def __new__(cls, *args, generate: bool = True, date: str|datetime|datetype|None = None, exist_ok: bool = False):
-        # Ensure a valid path was passed
-        path = Path(*args)
-        if path.is_file():
-            raise FileExistsError(f"{args[0]} is a file")
-        if generate:
-            path.mkdir(exist_ok=True, parents=True)
-        if not path.exists():
-            raise ValueError(f"{args[0]} does not exist")
-        # Initiate
-        self = Path.__new__(cls, *args)
-
-        # Initiate rawdata directory
-        if not generate or not date:
-            if not (path / "rawdata").exists():
-                raise DirNotFoundError(f"{path} does not contain a rawdata folder")
-            content = [d for d in (path / "rawdata").glob("[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]") if d.is_dir()]
-            if len(content) == 1:
-                object.__setattr__(self, "rawdata", content[0])
-                object.__setattr__(self, "date", self.rawdata.name)
-            elif content:
-                raise DirNotFoundError(f"Multiple date subfolders of the rawdata directory found: {content}. Specify a date (date=).")
-            else:
-                raise ValueError(f"No date subfolder of the rawdata diectory found, specify a date (date=){' and set generate=True' if not generate else ''}.")
-        else:
-            if isinstance(date, (datetime, datetype)):
-                date = date.strftime("%Y%m%d")        
-            object.__setattr__(self, "date", date)
-            object.__setattr__(self, "rawdata", path / "rawdata" / date)
-        # Initiate rawdata subfolders
-        object.__setattr__(self, "radar_dir", self.rawdata / "radar1")
-        object.__setattr__(self, "ground_dir", self.rawdata / "ground1")
-        object.__setattr__(self, "mocoref_dir", self.rawdata / "mocoref")
-        if generate:
-            self.radar_dir.mkdir(exist_ok=exist_ok, parents=True)
-            self.ground_dir.mkdir(exist_ok=exist_ok)
-            self.mocoref_dir.mkdir(exist_ok=exist_ok)
-        
-        # Initiate parameter directory
-        object.__setattr__(self, "para_dir", path / "parameter")
-        object.__setattr__(self, "m8t_5hz", self.para_dir / "config" / "m8t_5hz.conf")
-        object.__setattr__(self, "config_gps_imu", self.para_dir / "config" / "config_gps_imu.txt")
-        object.__setattr__(self, "process_config", self.para_dir / "config" / "process.config")
-        object.__setattr__(self, "config_para", self.para_dir / "config" / "config.para")
-        object.__setattr__(self, "srtm_para", self.para_dir / "srtm" / "srtm.para")
-        object.__setattr__(self, "cband_vv_para", self.para_dir / "1" / "cband_vv.para")
-        object.__setattr__(self, "lband_hh_para", self.para_dir / "2" / "lband_hh.para")
-        object.__setattr__(self, "lband_hv_para", self.para_dir / "3" / "lband_hv.para")
-        object.__setattr__(self, "pband_hh_para", self.para_dir / "4" / "phand_hh.para")
-        object.__setattr__(self, "cband_inf_para", self.para_dir / "5" / "cband_dem.para")
-        object.__setattr__(self, "pband_inf_para", self.para_dir / "6" / "pband_inf.para")
-        object.__setattr__(self, "lband_vv_para", self.para_dir / "7" / "lband_vv.para")
-        object.__setattr__(self, "lband_vh_para", self.para_dir / "8" / "lband_vh.para")
-        object.__setattr__(self, "pband_vh_para", self.para_dir / "9" / "pband_vh.para")
-        object.__setattr__(self, "pband_hv_para", self.para_dir / "a" / "pband_hv.para")
-        object.__setattr__(self, "pband_vv_para", self.para_dir / "b" / "pband_vv.para")
-
-        # Initiate processing directory
-        object.__setattr__(self, "processing", path / "processing")
-        object.__setattr__(self, "cross", self.processing / "cross")
-        # ...
-
-        # Initiate DroneData
-        self.data = DroneData()
-        return self
+    
+    def __new__(cls, *args, **kwargs) -> ProcessingDir:
+        return super().__new__(cls, *args, processing=True, **kwargs)
     
     def __init__(self, *args, generate: bool = True, date: str|datetime|datetype|None = None, exist_ok: bool = False) -> None:
         super().__init__(*args)
+
+        # Initiate rawdata directory
+        if hasattr(self, '_initialized') and self._initialized:
+            if not generate or not date:
+                if not (self / "rawdata").exists():
+                    raise DirNotFoundError(f"{self} does not contain a rawdata folder")
+                content = [d for d in (self / "rawdata").glob("[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]") if d.is_dir()]
+                if len(content) == 1:
+                    object.__setattr__(self, "rawdata", content[0])
+                    object.__setattr__(self, "date", self.rawdata.name)
+                elif content:
+                    raise DirNotFoundError(f"Multiple date subfolders of the rawdata directory found: {content}. Specify a date (date=).")
+                else:
+                    raise ValueError(f"No date subfolder of the rawdata diectory found, specify a date (date=){' and set generate=True' if not generate else ''}.")
+            else:
+                if isinstance(date, (datetime, datetype)):
+                    date = date.strftime("%Y%m%d")        
+                object.__setattr__(self, "date", date)
+                object.__setattr__(self, "rawdata", self / "rawdata" / date)
+            # Initiate rawdata subfolders
+            object.__setattr__(self, "radar_dir", self.rawdata / "radar1")
+            object.__setattr__(self, "ground_dir", self.rawdata / "ground1")
+            object.__setattr__(self, "mocoref_dir", self.rawdata / "mocoref")
+            if generate:
+                self.radar_dir.mkdir(exist_ok=exist_ok, parents=True)
+                self.ground_dir.mkdir(exist_ok=exist_ok)
+                self.mocoref_dir.mkdir(exist_ok=exist_ok)
+            
+            # Initiate parameter directory
+            object.__setattr__(self, "para_dir", self / "parameter")
+            object.__setattr__(self, "m8t_5hz", self.para_dir / "config" / "m8t_5hz.conf")
+            object.__setattr__(self, "config_gps_imu", self.para_dir / "config" / "config_gps_imu.txt")
+            object.__setattr__(self, "process_config", self.para_dir / "config" / "process.config")
+            object.__setattr__(self, "config_para", self.para_dir / "config" / "config.para")
+            object.__setattr__(self, "srtm_para", self.para_dir / "srtm" / "srtm.para")
+            object.__setattr__(self, "cband_vv_para", self.para_dir / "1" / "cband_vv.para")
+            object.__setattr__(self, "lband_hh_para", self.para_dir / "2" / "lband_hh.para")
+            object.__setattr__(self, "lband_hv_para", self.para_dir / "3" / "lband_hv.para")
+            object.__setattr__(self, "pband_hh_para", self.para_dir / "4" / "phand_hh.para")
+            object.__setattr__(self, "cband_inf_para", self.para_dir / "5" / "cband_dem.para")
+            object.__setattr__(self, "pband_inf_para", self.para_dir / "6" / "pband_inf.para")
+            object.__setattr__(self, "lband_vv_para", self.para_dir / "7" / "lband_vv.para")
+            object.__setattr__(self, "lband_vh_para", self.para_dir / "8" / "lband_vh.para")
+            object.__setattr__(self, "pband_vh_para", self.para_dir / "9" / "pband_vh.para")
+            object.__setattr__(self, "pband_hv_para", self.para_dir / "a" / "pband_hv.para")
+            object.__setattr__(self, "pband_vv_para", self.para_dir / "b" / "pband_vv.para")
+
+            # Initiate processing directory
+            object.__setattr__(self, "processing", self / "processing")
+            object.__setattr__(self, "cross", self.processing / "cross")
+            # ...
+
+            # Initiate DroneData
+            self.data = DroneData()
 
     def __setattr__(self, name: str, value: Any):
         if name in self.immutable:
             raise AttributeError(f"{name} is immutable")
         object.__setattr__(self, name, value)
 
-    def open(self, atx: str|Path|None = None, receiver: str|Path|None = None, minimal_overlap: float|timedelta = timedelta(minutes=10)) -> None:
-        with DataDir(self).open(atx=atx, receiver=receiver, require_drone=True, is_rnx=True, is_mocoref=True, minimal_overlap=minimal_overlap) as data:
+    def open(self) -> None:
+        with DataDir(self).open(require_drone=True, is_rnx=True, is_mocoref=True) as data:
             for key, file in data.files.items():
                 if key == "mocoref":
                     target_dir = self.mocoref_dir
@@ -859,30 +993,24 @@ class ProcessingDir(LoadDir):
             elevation_mask: float|None = None,
             minimal_overlap: timedelta|float = timedelta(minutes=10)
         ) -> None:
-        self.open(atx=atx, receiver=receiver, minimal_overlap=minimal_overlap)
-        
-        coords, results = ppk(
-            rover_obs=self.data.drone_rnx_obs,
-            base_obs=self.data.base_obs,
-            nav_file=self.data.drone_rnx_nav,
-            sbs_file=self.data.drone_rnx_sbs,
-            sp3_file=self.data.sp3 if use_precise else None,
-            clk_file=self.data.clk,
-            atx_file=atx,
-            receiver_file=receiver,
-            precise=use_precise,
-            out_path=self.data.drone_rnx_obs.with_suffix(".pos"),
-            download_dir=self.ground_dir,
-            config_file=config,
+
+        # Gather data
+        self.open()
+
+        # Run PPK
+        coords, results = self.data.ppk(
+            config=config,
+            use_precise=use_precise,
+            atx=atx,
+            receiver=receiver,
             elevation_mask=elevation_mask,
-            mocoref_pos=self.data.base_pos,
-            mocoref_file=self.data.mocoref,
-            retain=True,
             max_downloads=max_downloads,
-            max_retries=download_attempts
+            download_attempts=download_attempts,
+            minimal_overlap=minimal_overlap,
         )
         gpst, q = results["gpst"], results["quality"]
-
+        
+        # Plot flights
         fig, axs = plt.subplots(2, 1, squeeze=False, figsize=(8, 8))
         axs = axs.flatten()
         ax = axs[0]
@@ -895,12 +1023,24 @@ class ProcessingDir(LoadDir):
         ax.plot(coords.easting[q!=1], coords.northing[q!=1], 'r+')
         ax.set_xlabel("Easting (m)")
         ax.set_ylabel("Northing (m)")
+        ax.set_title(coords.frame.name)
         fig_name = self.data.timestamp.strftime("%Y-%m-%d-%H-%M-%S-position.svg")
         fig.savefig(self.radar_dir / fig_name, format="svg")
 
         plt.show()
 
-        # Continue with IMU and unimoco ... 
+        # Run unimoco on position output
+        moco_file = self.data.unimoco(results['path'])
+
+        # Trackfinding
+        trackfinder(moco_file)
+
+        # Syntax for populating folders?
+        # {GDL>construct}
+        # {GDL>proc,X} with X for each band folder (2: LHH et.c.)
+        # taskmon should finish (or ./execute inside each folder)
+        # both run {GDL>image1} and {GDL>cleaner,1}
+
 
     @property
     def track_count(self) -> int:
@@ -950,27 +1090,19 @@ class TomoDir(LoadDir):
     #   |    |-- ...
     #   |-- ...
 
-    def __new__(cls, *args, generate: bool = True, exist_ok: bool = False, scene: TomoScene|None = None) -> TomoDir:
-        path = Path(*args)
-        if path.is_file():
-            raise FileExistsError(f"{args[0]} is a file")
-        if generate:
-            path.mkdir(exist_ok=exist_ok)
-            read_only(path)
-        if not path.exists():
-            raise ValueError(f"{args[0]} does not exist")
-        if not path.suffix == ".tomo":
-            raise ValueError(f"{args[0]} is not a .tomo directory")
-        self = Path.__new__(cls, *args)
-        if generate:
-            object.__setattr__(self, "_scene", scene)
-        else:
-            object.__setattr__(self, "_scene", None)
+    def __new__(cls, *args, **kwargs) -> TomoDir:
+        return super().__new__(cls, *args, tomo=True, **kwargs)
 
-        return self
-    
     def __init__(self, *args, generate: bool = True, exist_ok: bool = False, scene: TomoScene|None = None) -> None:
         super().__init__(*args)
+        if hasattr(self, '_initialized') and self._initialized:
+            if not self.suffix == ".tomo":
+                raise ValueError(f"{self} is not a .tomo directory")
+
+            if generate:
+                object.__setattr__(self, "_scene", scene)
+            else:
+                object.__setattr__(self, "_scene", None)
 
     @property
     def scene(self) -> TomoScene:
@@ -1014,29 +1146,22 @@ class TomoDir(LoadDir):
 class TomoArchive(LoadDir):
     _scenes: TomoScenes|None
 
-    def __new__(cls, *args, generate: bool = True, exist_ok: bool = False, scenes: TomoScenes|None = None) -> TomoDir:
-        path = Path(*args)
-        if path.is_file():
-            raise FileExistsError(f"{args[0]} is a file")
-        if generate:
-            path.mkdir(exist_ok=exist_ok)
-        if not path.exists():
-            raise ValueError(f"{args[0]} does not exist")
-        if not generate:
-            content = [d for d in path.glob('*.tomo') if d.is_dir()]
-            if not content:
-                raise DirNotFoundError(f"Could not find any .tomo directories inside {path}")
-        self = Path.__new__(cls, *args)
-        if generate:
-            object.__setattr__(self, "_scenes", scenes)
-        else:
-            object.__setattr__(self, "_scenes", None)
+    def __new__(cls, *args, **kwargs) -> TomoArchive:
+        return super().__new__(cls, *args, archive=True, **kwargs)
 
-        return self
-    
-    def __init__(self, *args, generate: bool = True, exist_ok: bool = False, scenes: TomoScenes|None = None) -> None:
+    def __init__(self, *args, generate: bool = True, exist_ok: bool = False, scenes: TomoScenes|None = None) -> TomoDir:
         super().__init__(*args)
-
+        if hasattr(self, '_initialized') and self._initialized:
+            if not generate:
+                content = [d for d in self.glob('*.tomo') if d.is_dir()]
+                if not content:
+                    raise DirNotFoundError(f"Could not find any .tomo directories inside {self}")
+            
+            if generate:
+                object.__setattr__(self, "_scenes", scenes)
+            else:
+                object.__setattr__(self, "_scenes", None)
+    
     @property
     def parents(self) -> list[TomoArchive]:
         return [d for d in super().parents if isinstance(super(d), TomoArchive)]

@@ -6,7 +6,7 @@ import socket
 import shutil
 from pathlib import Path
 from datetime import datetime, date, time
-from typing import Dict, ClassVar, TypeAlias
+from typing import ClassVar, TypeAlias
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import numpy as np
 import pandas as pd
@@ -19,7 +19,7 @@ from rasterio.features import rasterize
 import json
 from collections import defaultdict
 import copy
-from typing import KeysView, ValuesView, ItemsView
+from typing import KeysView, ValuesView, ItemsView, Any, Iterator
 
 from .utils import warn, collect_statistics, estimaterr, apply_variable_descriptions, parse_datetime_string
 from .manager import writable
@@ -57,16 +57,15 @@ class ImageInfo:
     profile: Profile | None = None
     _paths: list[Path] = field(default_factory=list, repr=False)
     
-
     PAIR_PARAMETERS: ClassVar[list[str]] = ['date', 'width', 'res', 'smo', 'ham', 'hoff',
                   'depth', 'refr', 'lat', 'lon', 'DC', 'DL', 'HC', 'HV', 'thresh', 'squint']
     
     @property
-    def is_pair(self):
+    def is_pair(self) -> bool:
         return self.band in ['phh','cvv']
     
     @property
-    def category(self):
+    def category(self) -> list[str]:
         category = []
         if self.hoff == 0 and abs(self.depth) >= 0:
             category.append('sub')
@@ -312,17 +311,17 @@ class ImageInfo:
 @dataclass(slots=True)
 class SliceInfo:
     slices: list[ImageInfo] = field(default_factory=list)
+    _groups: None|defaultdict[Any, SliceInfo] = field(default=None, init=False)
 
     # Class level constant that defines a tomogram in terms of image parameters
     TOMOGRAM_PARAMETERS: ClassVar[list[str]] = ['date', 'spiral', 'band', 'width', 'res', 'smo', 'ham',
                     'lat', 'lon', 'DC', 'DL', 'HC', 'HV', 'squint']
 
-
-    def append(self, item: ImageInfo) -> 'SliceInfo':
+    def append(self, item: ImageInfo) -> SliceInfo:
         self.slices.append(item)
         return self
     
-    def read(self, db0, npar: int = os.cpu_count()) -> 'SliceInfo':
+    def read(self, db0, npar: int = os.cpu_count()) -> SliceInfo:
         from concurrent.futures import ThreadPoolExecutor, as_completed
         from tqdm import tqdm
 
@@ -339,18 +338,18 @@ class SliceInfo:
                     print(f"Error reading file: {e}")
         return read_slices
     
-    def extend(self, other: 'SliceInfo') -> 'SliceInfo':
+    def extend(self, other: SliceInfo) -> SliceInfo:
         if not isinstance(other, SliceInfo):
             raise TypeError("Can only extend with another SliceInfo instance.")
         self.slices.extend(other.slices)
         return self
     
-    def copy(self) -> 'SliceInfo':
+    def copy(self) -> SliceInfo:
         new_slice_info = SliceInfo()
         new_slice_info.slices = [slice for slice in self.slices]
         return new_slice_info
 
-    def unique(self) -> 'SliceInfo':
+    def unique(self) -> SliceInfo:
         unique = SliceInfo()
         seen = set()
 
@@ -365,22 +364,52 @@ class SliceInfo:
         
         return unique
 
-    def group(self, key: str | list[str], list: bool = False) -> Dict[str, 'SliceInfo'] | list['SliceInfo']:
-        from collections import defaultdict
+    @property
+    def groups(self) -> defaultdict[Any, SliceInfo]:
+        if self._groups is None:
+            self._groups = defaultdict(SliceInfo)
+        return self._groups
+    
+    @groups.setter
+    def groups(self, value: defaultdict[Any, SliceInfo]) -> None:
+        for s in value.values():
+            if not isinstance(s, SliceInfo):
+                raise TypeError(f"Only SliceInfo objects can be included in groups, not {type(s)}.")
+        self._groups = value
+    
+    def group(self, key: str | list[str]) -> dict[str, SliceInfo]:
         if isinstance(key, str):
             key = [key]
         
         grouped = defaultdict(SliceInfo)
-        for slice in self.slices:
+        for slice in self:
             if len(key) == 1:
                 group_key = slice.get(key[0])
             else:
-                group_key = tuple(getattr(slice, k) for k in key)
+                group_key = tuple(slice.get(k) for k in key)
             grouped[group_key].append(slice)
         
-        if list:
-            grouped = [g for g in grouped.values()]
+        self._groups = grouped
+
         return grouped
+    
+    def regroup(self, key: str | list[str]) -> dict[str, SliceInfo]:
+        if isinstance(keys,str):
+            keys = [keys]
+
+        regrouped = defaultdict(SliceInfo)
+        for outer_key, sliceinfo in self.groups.items():
+            for slice in sliceinfo:
+                if len(key) == 1:
+                    group_key = slice.get(key[0])
+                else:
+                    group_key = tuple(slice.get(k) for k in key)
+                regrouped[group_key].append(slice)
+                regrouped[group_key].groups[outer_key].append(slice)
+
+        self._groups = regrouped
+
+        return regrouped
     
     def pair(self, retain: bool = False):
         def make_key(slice):
@@ -411,12 +440,12 @@ class SliceInfo:
 
         return paired
 
-    def tomograms(self) -> list['SliceInfo']:
+    def tomograms(self) -> list[SliceInfo]:
         tomo_slices = self.group(self.TOMOGRAM_PARAMETERS,list=True)
         tomo_slices = [s for s in tomo_slices if len(s) > 1]
         return tomo_slices
     
-    def categorize(self) -> Dict[str, 'SliceInfo']:
+    def categorize(self) -> dict[str, SliceInfo]:
         categories = defaultdict(SliceInfo)
         for slice in self:    
             for cat in slice.category:
@@ -424,7 +453,7 @@ class SliceInfo:
         
         return categories
 
-    def sort(self, key: str) -> 'SliceInfo':
+    def sort(self, key: str) -> SliceInfo:
         values = self.get(key)
         if isinstance(values, np.ndarray) and values.ndim == 1:
             idx = np.argsort(values)
@@ -450,8 +479,8 @@ class SliceInfo:
         self.slices = filtered_slices
 
     @classmethod
-    def scan(self, path: str|Path = '.', filter: ImageInfo = None, 
-             read: bool = False, npar: int = os.cpu_count) -> 'SliceInfo':
+    def scan(cls, path: str|Path = '.', filter: ImageInfo = None, 
+             read: bool = False, npar: int = os.cpu_count) -> SliceInfo:
         return sliceinfo(path, filter=filter, read=read, npar=npar)
 
     def __getitem__(self, index):
@@ -464,7 +493,7 @@ class SliceInfo:
     def __len__(self):
         return len(self.slices)
         
-    def __iter__(self):
+    def __iter__(self) -> Iterator[ImageInfo]:
         return iter(self.slices)
     
     def __bool__(self):
@@ -506,7 +535,7 @@ class Mask:
 
 class Masks:
     __slots__ = ("parent", "masks")
-    def __init__(self, parent: TomoInfo = None, masks: dict[str,list[Mask]] = defaultdict[list]):
+    def __init__(self, parent: TomoInfo = None, masks: dict[str,list[Mask]] = defaultdict[list]) -> Masks:
         self.parent: TomoInfo = parent
         self.masks: dict[str,list[Mask]] = masks
             
@@ -590,7 +619,7 @@ class Tomograms:
         return f"Tomograms(raw={self.raw is not None}, multilooked={self.multilooked is not None}, filtered={self.filtered is not None})"
     
     @classmethod
-    def load(cls, path: str|Path) -> 'Tomograms':
+    def load(cls, path: str|Path) -> Tomograms:
         """
         Create a Tomograms instance from a directory containing tomogram files.
         Path validation is delegated to TomoScene.load, and this method should only be called from there.
@@ -688,7 +717,7 @@ class Tomograms:
         save_tomogram(self.multilooked, 'multilooked_tomogram.tif')
         save_tomogram(self.filtered, 'filtered_tomogram.tif')
 
-    def copy(self) -> 'Tomograms':
+    def copy(self) -> Tomograms:
         new_tomograms = Tomograms()
         new_tomograms.raw = self.raw.copy() if self.raw is not None else None
         new_tomograms.multilooked = self.multilooked.copy() if self.multilooked is not None else None
@@ -802,7 +831,7 @@ class Filter:
 @dataclass(slots=True)
 class TomoStats:
     parent: TomoInfo | SceneStats = field(repr=False,compare=False)
-    stats: Dict[str, pd.DataFrame] = field(default_factory=dict)
+    stats: dict[str, pd.DataFrame] = field(default_factory=dict)
 
     def copy(self) -> TomoStats:
         new_stats = TomoStats()
@@ -847,7 +876,7 @@ class TomoStats:
             apply_variable_descriptions(self['multilooked'])
 
     @classmethod
-    def load(cls, parent: 'TomoInfo'|'SceneStats', path: Path|str, cached: bool) -> TomoStats:
+    def load(cls, parent: TomoInfo|SceneStats, path: Path|str, cached: bool) -> TomoStats:
         path = Path(path)
         stats = cls(parent=parent)
         # Load main statistics files
@@ -939,7 +968,7 @@ class SceneStats:
     
     
     @classmethod
-    def load(cls, path: str|Path, npar: int = os.cpu_count()) -> 'SceneStats':
+    def load(cls, path: str|Path, npar: int = os.cpu_count()) -> SceneStats:
         path = Path(path)
         # Check if the path exists
         if not path.exists():
@@ -989,7 +1018,7 @@ class TomoInfo:
     masks: Masks = field(init=False)
     multilook: Multilook = field(init=False)
     filter: Filter = field(init=False)
-    stats: Dict[str, pd.DataFrame] = field(init=False, default_factory=dict, repr=False)
+    stats: dict[str, pd.DataFrame] = field(init=False, default_factory=dict, repr=False)
     _slices: SliceInfo = field(default_factory=SliceInfo, repr=False)
     _scene: 'TomoScene' = field(default=None, repr=False, compare=False)
 
@@ -1036,7 +1065,7 @@ class TomoInfo:
     def forge(cls, slices: SliceInfo, multilook: int = 1, sigma_xi: float = 0.9, 
               filter_size: int = 9, point_percentile: float = 98.0, point_threshold: int = 9,
               fused: bool = True, sub: bool = True, sup: bool = True, canopy: bool = True, 
-              npar: int = os.cpu_count(), RR: bool = True, masks: str = "") -> 'TomoInfo':
+              npar: int = os.cpu_count(), RR: bool = True, masks: str = "") -> TomoInfo:
         """
         Initializes a TomoInfo instance from a SliceInfo with slices from the same tomogram.
         """
@@ -1156,7 +1185,7 @@ class TomoInfo:
         return tomo
 
     @classmethod
-    def load(cls, path: str|Path, cached: bool = True) -> 'TomoInfo':
+    def load(cls, path: str|Path, cached: bool = True) -> TomoInfo:
         """
         Create a TomoInfo instance from a band  sub-directory of a .tomo directory.
         Path validation is delegated by TomoScene.load() and this method should only be called from there.
@@ -1271,7 +1300,7 @@ class TomoInfo:
             if not target_path.exists():
                 shutil.copy2(s,target_path)
 
-    def fuse(self, other: 'TomoInfo', RR: bool = True) -> 'TomoInfo':
+    def fuse(self, other: TomoInfo, RR: bool = True) -> TomoInfo:
         """
         Fuses a subsurface or supersurface category TomoInfo instance with one of the other category.
         
@@ -1322,7 +1351,7 @@ class TomoInfo:
                 warn("Different masks applied to tomograms, updating masks.")
                 fused.masks.update()
 
-    def copy(self) -> 'TomoInfo':
+    def copy(self) -> TomoInfo:
         new_info = TomoInfo(
             band=self.band,
             width=self.width,
@@ -1371,8 +1400,8 @@ class TomoScene:
     id: str = ""
     date: datetime = None
     spiral: int = None
-    tomograms: Dict[str, TomoInfo] = field(default_factory=dict)
-    _info: Dict[str, float] = field(default_factory=dict)
+    tomograms: dict[str, TomoInfo] = field(default_factory=dict)
+    _info: dict[str, float] = field(default_factory=dict)
     track: pd.DataFrame = field(default_factory=pd.DataFrame)
     _model: SARModel = None
     
@@ -1425,7 +1454,7 @@ class TomoScene:
         return new_scene
     
     @classmethod
-    def load(cls, path: str|Path = '.', cached: bool = True, npar: int = os.cpu_count()) -> 'TomoScene':
+    def load(cls, path: str|Path = '.', cached: bool = True, npar: int = os.cpu_count()) -> TomoScene:
         """
         Create a TomoScene instance from a .tomo directory.
         """
@@ -1513,7 +1542,7 @@ class TomoScenes:
     scenes: SceneMap
 
     KEY_TYPES: ClassVar = datetime|date|tuple[date,time]|tuple[datetime,int]|tuple[date,time,int]
-    def __init__(self, scenes: list[TomoScene]):
+    def __init__(self, scenes: list[TomoScene]) -> TomoScenes:
         self.scenes = {}
         for scene in scenes:
             key = (scene.date.date(), scene.date.time(), scene.spiral)
@@ -1555,7 +1584,7 @@ class TomoScenes:
         self.scenes = merge_scene_maps([self.scenes, new_scenes])
 
     @classmethod
-    def load(self, path: str|Path = ".", cached: bool = True, npar: int = os.cpu_count) -> 'TomoScenes':
+    def load(cls, path: str|Path = ".", cached: bool = True, npar: int = os.cpu_count) -> TomoScenes:
         path = Path(path)
         tomo_scenes = []
         if path.is_dir():
@@ -1764,26 +1793,6 @@ def scene_map(obj: object) -> SceneMap:
             mappings.append(scene_map(s))
         merge_scene_maps(mappings)
     return mapping
-
-## Regrouping a grouped SliceInfo
-def regroup(grouped_dict: Dict[str,SliceInfo], keys: str | list[str], list: bool = False):
-    regrouped = defaultdict(lambda: defaultdict(SliceInfo))
-
-    if isinstance(keys,str):
-        keys = [keys]
-
-    # Group
-    for outer_key, sliceinfo in grouped_dict.items():
-        for s in sliceinfo:
-            key = tuple(s.get(k) for k in keys)
-            regrouped[key][outer_key].append(s)
-
-    # Convert to list if list is set to True
-    if list:
-        result = [s for key, s in regrouped.items()]
-    else:
-        result = regrouped
-    return result
 
 ## Calculate vres from SliceInfo
 def calculate_vres(slices: SliceInfo) -> float | None:

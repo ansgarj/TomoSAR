@@ -4,7 +4,7 @@
 		"Source": "Package manager or https://gnuwin32.sourceforge.net/packages/make.htm",
 		"Used_by": {
 			"tools": {
-				"tomosar": ["setup"],
+				"rdtomo": ["setup"],
 				"make": ["install", "update"]
 			}
 		}
@@ -14,22 +14,30 @@
 		"Source": "https://github.com/rtklibexplorer/RTKLIB",
 		"Used_by": {
 			"module": [
-				"tomosar.fetch_swepos()"
+				"rdtomo.DataDir.init()",
+				"rdtomo.DataDir.open()",
+				"rdtomo.gnss.ubx2rnx()",
+				"rdtomo.gnss.reach2rnx()",
+				"rdtomo.gnss.chc2rnx()"
+
 			],
 			"tools": {
-				"tomosar": ["init", "fetch-swepos"]
+				"rdtomo": ["init"]
 			}
 		}
 	},
 	"rnx2rtkp": {
-		"Usage": "GNSS RTK post processing",
+		"Usage": "GNSS post-processing kinematics (PPK)",
 		"Source": "https://github.com/rtklibexplorer/RTKLIB",
 		"Used_by": {
 			"module": [
-				"N/A"
+				"rdtomo.ppk()",
+				"rdtomo.ProcessingDir.init()",
+				"rdtomo.gnss.rnx2rtkp()",
+				"rdtomo.data.DroneData.ppk()"
 			],
 			"tools": {
-				"tomosar": ["init"]
+				"rdtomo": ["init"]
 			}
 		}
 	},
@@ -38,8 +46,8 @@
     	"Source": "https://terras.gsi.go.jp/ja/crx2rnx.html",
     	"Used_by": {
 			"module": [
-				"tomosar.gnss.fetch_swepos_files()",
-				"tomosar.fetch_swepos()"
+				"rdtomo.gnss.fetch_swepos_files()",
+				"rdtomo.fetch_swepos()"
     		],
 			"tools": {
 				"tomoprocess": ["init", "fetch-swepos"]
@@ -51,8 +59,8 @@
     	"Source": "https://gnss.gfz.de/services/gfzrnx",
     	"Used_by": {
 			"module": [
-				"tomosar.gnss.unpack_and_merge_rinex()",
-				"tomosar.fetch_swepos()"
+				"rdtomo.gnss.unpack_and_merge_rinex()",
+				"rdtomo.fetch_swepos()"
     		],
 			"tools": {
 				"tomoprocess": ["init", "fetch-swepos"]
@@ -64,22 +72,34 @@
 		"Source": "https://gage.upc.edu/en/learning-materials/software-tools/glab-tool-suite-links/glab-download",
 		"Used_by": {
 			"module": [
-				"tomosar.station_ppp()"
+				"rdtomo.station_ppp()"
     		],
 			"tools": {
-				"tomoprocess": ["init", "station-ppp"]
+				"rdtomo": ["init", "station-ppp"]
+			}
+		}
+	},
+	"gdl": {
+		"Usage": "Running Radaz procedures",
+		"Source": "https://github.com/gnudatalanguage/gdl",
+		"Used_by": {
+			"module": [
+				"rdtomo.manager.gdl()"
+			],
+			"tools": {
+				"rdtomo": ["init", "slice"]
 			}
 		}
 	},
 	"unimoco": {
-		"Usage": "Integrating IMU and GNSS",
+		"Usage": "Integrating IMU and GNSS (Kahlman filter)",
 		"Source": "Radaz",
 		"Used_by": {
 			"module": [
-				"N/A"
+				"rdtomo.ProcessingDir.init()"
 			],
 			"tools": {
-				"N/A": []
+				"rdtomo": ["init"]
 			}
 		}
 	},
@@ -88,10 +108,10 @@
 		"Source": "Install gdal through your package manager",
 		"Used_by": {
 			"module": [
-				"tomosar.build_vrt"
+				"rdtomo.build_vrt"
 			],
 			"tools": {
-				"tomosar": ["slice"]
+				"rdtomo": ["slice"]
 			}
 		}
 	},
@@ -100,10 +120,10 @@
 		"Source": "Install gdal through your package manager",
 		"Used_by": {
 			"module": [
-				"tomosar.generate_raster"
+				"rdtomo.generate_raster"
 			],
 			"tools": {
-				"tomosar": ["slice"]
+				"rdtomo": ["slice"]
 			}
 		}
 	}

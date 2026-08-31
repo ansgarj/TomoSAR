@@ -16,7 +16,7 @@ make install
 ```
 
 
-Among several other things, this will create a virtual environment inside a `.venv` folder inside the `TomoSar` project directory with `tomosar` installed. I find this helpful to contain the project in one directory. 
+Among several other things, this will create a virtual environment inside a `.venv` folder inside the _rd-tomo_ project directory with `rdtomo` installed. I find this helpful to contain the project in one directory. 
 
 **NOTE**: add any other files or subdirectories inside the TomoSAR directory that should not be pushed to GitHub to `.gitignore` if I have not added them already.
 

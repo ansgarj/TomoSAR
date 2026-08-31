@@ -10,12 +10,14 @@ from ..utils import interactive_console
 from ..data import LoadDir, TomoArchive, TomoDir, ProcessingDir, DataDir
 
 @click.command()
-@click.argument("directories", nargs=-1, type=click.Path(exists=True, path_type=LoadDir), default=[LoadDir.cwd()])
+@click.argument("directories", nargs=-1, type=click.Path(exists=True, path_type=LoadDir), default=None)
 @click.option("-p", "--paths", multiple=True, type=click.Path(exists=True, path_type=LoadDir), default=[], help="Add paths to the list of defined variables in the interactive console")
 @click.option("-i", "--info", is_flag=True, help="Print info on .tomo directory and exit")
 @click.pass_context
-def load(ctx: click.Context, directories: list[LoadDir], paths: list[Path], info: bool) -> None:
-    """Loads a directory into a Python terminal."""
+def load(ctx: click.Context, directories: list[LoadDir]|None, paths: list[Path], info: bool) -> None:
+    """Loads directories into a Python terminal."""
+    if not directories:
+        directories = [LoadDir.cwd()]
     if info:
         info = {}
         for dir in directories:

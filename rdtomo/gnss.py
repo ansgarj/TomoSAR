@@ -20,7 +20,7 @@ from .version import version
 from .config import Settings
 from .utils import prompt_ftp_login, gunzip, warn, local, string_sub, date_to_gps_week, gps_week_to_date, leap_seconds, parse_datetime_string
 from .manager import run, tmp, resource, modify_config
-from .coords import Pos, geo_to_ecef, ecef_to_geo, DeltaPos
+from .position import Pos, ReferenceFrame, DeltaPos
 
 # Named functions for binary executables
 def crx2rnx(crx_file: str|Path) -> Path:
@@ -440,7 +440,7 @@ def chc2rnx(hcn_file: str|Path, nav: bool = False, sbs: bool = False, obs_file: 
 def rnx2rtkp(
         rover_obs: str|Path,
         base_obs: str|Path,
-        nav_file: str|Path,
+        nav_files: list[str|Path],
         out_path: str|Path,
         config_file: str|Path|None = None,
         sbs_file: str|Path|None = None,
@@ -472,26 +472,24 @@ def rnx2rtkp(
         cmd.extend(["-sys", ",".join(constellations), "-f", freqs])
     if mocoref_pos or mocoref_file:
         if not mocoref_pos:
-            mocoref_pos, _ = generate_mocoref(mocoref_file, type=mocoref_type, line=mocoref_line, generate=False)
+            base_start, base_end, _, _ = extract_rnx_info(base_obs)
+            base_epoch = base_start + (base_end - base_start)/2
+            mocoref_pos, _ = generate_mocoref(mocoref_file, base_epoch,type=mocoref_type, line=mocoref_line, generate=False)
         if unify_input_frames:
             mocoref_pos.reframe("ITRF")
-        cmd.extend(["-r", *mocoref_pos])
-    with resource(base_obs) as tmp_obs:
-        if antenna_type:
-            update_antenna(tmp_obs, antenna=antenna_type, radome=radome)
-        # cmd.extend(['-x', '3']) # Used for debugging
-        cmd.extend([rover_obs, tmp_obs, nav_file])
-        if sbs_file:
-            cmd.append(sbs_file)
-        if sp3_file:
-            cmd.append(sp3_file)
-        if clk_file:
-            cmd.append(clk_file)
-        result = run(cmd, capture=capture)
-        if capture:
-            (Path.cwd() / '.stat').unlink()
-            (Path.cwd() / '_events.pos').unlink()
-        return result.stdout
+        cmd.extend(["-r", *tuple(p[0] for p in mocoref_pos)])
+    # cmd.extend(['-x', '3']) # Used for debugging
+    cmd.extend([rover_obs, base_obs, *nav_files])
+    if sbs_file:
+        cmd.append(sbs_file)
+    if sp3_file:
+        cmd.append(sp3_file)
+    if clk_file:
+        cmd.append(clk_file)
+    result = run(cmd, capture=capture)
+    (Path.cwd() / '.stat').unlink(missing_ok=True)
+    (Path.cwd() / '_events.pos').unlink(missing_ok=True)
+    return result.stdout
 
 def glab_ppp(
         obs_file: str|Path,
@@ -562,13 +560,13 @@ def glab_ppp(
 def extract_rnx_info(file_path: str|Path) -> tuple[datetime|None,
                                                    datetime|None,
                                                    Pos,
-                                                   tuple[float,float,float]]:
+                                                   DeltaPos]:
     """
     Extract start/end times and approximate position from RINEX header. Output:
     - TIME OF FIRST OBS (datetime or None): if not present in header reads from RINEX epochs
     - TIME OF LAST OBS (datetime or None): if not present in header reads from RINEX epochs
     - APPROX POS XYZ (Pos object)
-    - ANTENNA: DELTA H/E/N (tuple of floats)
+    - ANTENNA: DELTA H/E/N (DeltaPos in ENU)
     """
     earliest_date = datetime(year=2020, month=1, day=1,tzinfo=timezone.utc)
     start_time = None
@@ -602,7 +600,7 @@ def extract_rnx_info(file_path: str|Path) -> tuple[datetime|None,
                     pass
             elif 'ANTENNA: DELTA H/E/N' in line:
                 parts = line.strip().split()
-                antenna_delta = (float(parts[1]), float(parts[2]), float(parts[0]))
+                antenna_delta = DeltaPos(float(parts[1]), float(parts[2]), float(parts[0]))
     if start_time is None or start_time < earliest_date:
         start_time = get_first_rinex_timestamp(file_path)
     if end_time is None or end_time < earliest_date:
@@ -1004,7 +1002,7 @@ def fetch_cod_files(
                 ftp.cwd(ftp_path)
                 files = ftp.nlst()
 
-                # Find COD INX file
+                # Find ESA INX file
                 target_name = f"ESA0OPSFIN_{current.year}{doy}0000_01D_02H_GIM.INX.gz"
                 match = next((f for f in files if f == target_name), None)
                 
@@ -1333,16 +1331,41 @@ def merge_swepos_rinex(files: list[str|Path], output_dir: Path) -> tuple[Path|No
 
 # Read output
 def read_rnx2rtkp_out(input: str|Path) -> tuple[Pos, dict]:
-    """Parses a rnx2rtkp .pos file.
+    """Parses a rnx2rtkp .pos file. A string is interpreted to be the content of the .pos file:
+    to pass the path convert it to a Path object first.
+
     Returns:
         - pos: position of rover as Pos object
         - results: dict with keys
             - "SD": Standard deviation of rover pos solution in ENU as a DeltaPos object,
-            - "ration": AR ratio,
+            - "ratio": AR ratio,
             - "gps_week": GPS week of each point
             - "gpst": GPST (s) of each point, as seconds into current week
             - "quality": Q number
+            - "path": Path object pointing to file with frame corrected position, or None if just the
+                content (a string) was passed
     """
+
+    def infer_formats(line: str) -> list[str]:
+        tokens = line.split()
+        formats = []
+
+        for tok in tokens:
+            if "e" in tok or "E" in tok:
+                # scientific notation
+                base, exp = tok.split("e") if "e" in tok else tok.split("E")
+                decimals = len(base.split(".")[1]) if "." in base else 0
+                width = len(tok)
+                formats.append(f"%{width}.{decimals}e")
+            elif "." in tok:
+                decimals = len(tok.split(".")[1])
+                width = len(tok)
+                formats.append(f"%{width}.{decimals}f")
+            else:
+                width = len(tok)
+                formats.append(f"%{width}d")
+
+        return formats
     
     if isinstance(input, str):
         lines = input.splitlines()
@@ -1351,7 +1374,15 @@ def read_rnx2rtkp_out(input: str|Path) -> tuple[Pos, dict]:
             lines = f.readlines()
 
     # Skip header lines
-    data_lines = [line for line in lines if not line.startswith('%')]
+    header_lines = []
+    for i in range(len(lines)):
+        line = lines[i]
+        if line.startswith('%'):
+            header_lines.append(line)
+        else:
+            fmt = infer_formats(line)
+            break
+    data_lines = lines[i:]
 
     # Parse numeric data
     try:
@@ -1361,7 +1392,6 @@ def read_rnx2rtkp_out(input: str|Path) -> tuple[Pos, dict]:
         raise ValueError(f"Could not parse numeric data from {input}")
 
     # Constants
-
     def get_epoch(gps_array: np.ndarray) -> np.ndarray:
         """
         Convert GPS week and seconds-of-week to decimal years (UTC).
@@ -1388,8 +1418,9 @@ def read_rnx2rtkp_out(input: str|Path) -> tuple[Pos, dict]:
     
     # Auto-detect coordinate columns
     results = {}
+    rf = Settings().TARGET_FRAME
     if data.shape[1] >= 5:
-        pos = Pos.geodetic(data[:,2:5], lat_first=True, epoch=get_epoch(data[:, 0:2]), frame="ITRF").reframe(Settings().TARGET_FRAME)
+        pos = Pos(np.hstack((data[:,2:5], get_epoch(data[:, 0:2]).reshape(-1,1))), frame="ITRF").reframe(rf)
         results["SD"] = DeltaPos(data[:, [8,7,9]])      # ENU SD
         results["ratio"] = data[:, 14]                  # AR ratio
         results["gps_week"] = data[:, 0]                # GPS week
@@ -1398,6 +1429,20 @@ def read_rnx2rtkp_out(input: str|Path) -> tuple[Pos, dict]:
     else:
         raise ValueError(f"Unexpected format in {input}: not enough columns")
     
+    # Insert frame corrected position into data and write file
+    if isinstance(input, Path):
+        data[:,2:5] = pos.coords
+        out_path = input.with_suffix(f".{rf}.pos")
+        with open(out_path, "w") as f:
+            for line in header_lines:
+                f.write(line)
+
+            np.savetxt(f, data, fmt=fmt)
+    
+        results["path"] = out_path
+    else:
+        results["path"] = None
+
     return pos, results
 
 def read_glab_out(input: str|Path, verbose: bool = False) -> tuple[Pos, dict]:
@@ -1593,7 +1638,7 @@ def generate_mocoref(
     """If a Pos object is passed, the only function of generate_mocoref is to write a mocoref.moco file
     (if generate=True) and/or print its content to the terminal (if verbose=True).
     
-    Otherwose reads mocoref data from auxiliary data (file, dict or DataFrame). Valid types: CSV, JSON, LLH and mocoref.
+    Otherwise reads mocoref data from auxiliary data (file, dict or DataFrame). Valid types: CSV, JSON, LLH and mocoref.
     If not specified attempts to determine file type from file extension. The line parameter specifies which line in a CSV
     file or DataFrame the mocoref data is read from: DataFrame will be interpreted as having the mocoref data in a single
     line if the line parameter is positive, and as being an LLH log if it is zero.
@@ -1611,6 +1656,7 @@ def generate_mocoref(
     - pos: Pos object with the mocoref position
     - mocoref_path: path to generated file or None"""
     settings = Settings()
+    rf = ReferenceFrame(settings.MOCOREF_FRAME)
 
     # Check if Pos object was passed
     data_file = None
@@ -1628,7 +1674,7 @@ def generate_mocoref(
     # Read position from aux data
     else:
         if not timestamp:
-            raise ValueError("For non-Pos the timestamp parameter must be specified")
+            raise ValueError("For non-Pos objects the timestamp parameter must be specified")
         if isinstance(data, dict):
             type = "JSON"
         elif isinstance(data, pd.DataFrame):
@@ -1694,7 +1740,7 @@ def generate_mocoref(
                 mocoref_height = data[settings.MOCOREF_HEIGHT].iloc[line - 1]
                 mocoref_antenna = data[settings.MOCOREF_ANTENNA].iloc[line - 1]
 
-                # Modify antenna offset to account for difference between RS3 and CHCI83 PCO:
+                # Modify antenna offset to account for difference between mocorec receiver and receiver used for processing:
                 mocoref_antenna = mocoref_antenna + pco_diff
 
             case "json":
@@ -1755,7 +1801,7 @@ def generate_mocoref(
                         end = point + 1
                         segment = data.iloc[start:end]
                         weights.append(len(segment))
-                        points.append(geo_to_ecef(
+                        points.append(rf.geo_to_ecef(
                             segment[settings.MOCOREF_LONGITUDE].mean(),
                             segment[settings.MOCOREF_LATITUDE].mean(),
                             segment[settings.MOCOREF_HEIGHT].mean()
@@ -1763,7 +1809,7 @@ def generate_mocoref(
                         start = end
                     segment = data.iloc[start:]
                     weights.append(len(segment))
-                    points.append(geo_to_ecef(
+                    points.append(rf.geo_to_ecef(
                         segment[settings.MOCOREF_LONGITUDE].mean(),
                         segment[settings.MOCOREF_LATITUDE].mean(),
                         segment[settings.MOCOREF_HEIGHT].mean()
@@ -1794,7 +1840,7 @@ def generate_mocoref(
 
                     # Perform weighted mean
                     pos = np.sum(weights[:, np.newaxis] * points, axis=0) / np.sum(weights)
-                    mocoref_longitude, mocoref_latitude, mocoref_height = ecef_to_geo(*pos)
+                    mocoref_longitude, mocoref_latitude, mocoref_height = rf.ecef_to_geo(*pos)
                 else:
                     mocoref_latitude = data[settings.MOCOREF_LATITUDE].mean()
                     mocoref_longitude = data[settings.MOCOREF_LONGITUDE].mean()
@@ -1815,7 +1861,7 @@ def generate_mocoref(
         # Store position as Pos object
         if isinstance(timestamp, str):
             timestamp = parse_datetime_string(timestamp)
-        mocoref_pos = Pos.geodetic(mocoref_longitude, mocoref_latitude, mocoref_height + mocoref_antenna, epoch=timestamp, frame=Settings().MOCOREF_FRAME)
+        mocoref_pos = Pos(mocoref_longitude, mocoref_latitude, mocoref_height + mocoref_antenna, epoch=timestamp, frame=rf, geodetic=True)
 
     if generate or verbose:
         lines = []
@@ -1922,7 +1968,7 @@ def fetch_swepos(
 def ppk(
         rover_obs: str|Path,
         base_obs: str|Path,
-        nav_file: str|Path,
+        nav_file: str|Path|list[str|Path],
         out_path: str|Path|None = None,
         config_file: str|Path|None = None,
         sbs_file: str|Path|None = None,
@@ -1954,7 +2000,7 @@ def ppk(
     BASE will be read from there (mocoref data can be read from CSV files, JSON files, LLH logs or mocoref.moco logs as in
     tomosar.utils.generate_mocoref). Otherwise the BASE position will be read from the BASE OBS header.
     
-    If a config file is not provided, the rd=tomo internal config will be used.
+    If a config file is not provided, the rd-tomo internal config will be used.
     
     If dry is True, the files needed to be downloaded will be displayed but no processing will be run (this will have no effect
     if not run in precise mode). If retain is True the downloaded ephmerides data will be placed in the output directory, otherwise
@@ -1969,16 +2015,16 @@ def ppk(
     it will be explicitly reframed to ITRF.
     
     Returns:
-    - pos: a Pos object with the rover position
+    - pos: a Pos object with PPK solution for the rover position
     - result: a dict with the following keys:
         - "SD": Standard deviation of pos solution in ENU as a DeltaPos object,
-        - "ration": AR ratio of each point,
+        - "ratio": AR ratio of each point,
         - "gps_week": GPS week of each point
         - "gpst": GPST (s) of each point, as seconds into current week
         - "quality": Q number
         - "sp3": .SP3 Path or None
-        - "clk": .CLK Path or None
-        - "inx": .INX Path or None"""
+        - "clk": .CLK Path or None,
+        - "path": .pos Path or None"""
 
     rover_obs = Path(rover_obs)
     if not rover_obs.is_file():
@@ -1988,9 +2034,27 @@ def ppk(
     if not base_obs.is_file():
         raise FileNotFoundError(f"Base OBS file not found: {base_obs}")
     
-    nav_file = Path(nav_file)
-    if not nav_file.is_file():
-        raise FileNotFoundError(f"NAV file not found: {nav_file}")
+    nav_files = []
+    if not isinstance(nav_file, list):
+        if nav_file:
+            path = Path(nav_file)
+            if path.is_file():
+                nav_files.append(path)
+            else:
+                raise FileNotFoundError(f"NAV file not found: {path}")
+    else:
+        for file in nav_file:
+            if file:
+                path = Path(file)
+                if path.is_file():
+                    nav_files.append(path)
+                else:
+                    raise FileNotFoundError(f"NAV file not found: {path}")
+    
+    if len(nav_files) == 0:
+        raise ValueError("No NAV file specified")
+    
+    nav_str = ', '.join(local(nav_files))
 
     # Check which ephemeris files were provided
     eph_files = set()
@@ -2025,7 +2089,7 @@ def ppk(
     if download_dir:
         output_dir = Path(download_dir)
 
-    print(f"Running {'raw ' if raw else ''}PPK {'in precise mode ' if precise else 'with broadcast data '}...\n   Rover: {local(rover_obs)}\n   Base: {local(base_obs)}\n   Nav: {local(nav_file)}\n{f'   SP3: {local(sp3_file)}\n' if sp3_file else ''}{f'   CLK: {local(clk_file)}\n' if clk_file else ''}{f'-->Out: {local(out_path)}' if out_path else ''}", end="", flush=True)
+    print(f"Running {'raw ' if raw else ''}PPK {'in precise mode ' if precise else 'with broadcast data '}...\n   Rover: {local(rover_obs)}\n   Base: {local(base_obs)}\n   Nav: " + nav_str + f"\n{f'   SP3: {local(sp3_file)}\n' if sp3_file else ''}{f'   CLK: {local(clk_file)}\n' if clk_file else ''}{f'-->Out: {local(out_path)}\n' if out_path else ''}", end="", flush=True)
     antenna_type, radome = _ant_type(base_obs)
     if not raw:    
         print(f"Detected base antenna type: {antenna_type} {radome}")
@@ -2078,7 +2142,7 @@ def ppk(
                 out = rnx2rtkp(
                     rover_obs=rover_obs,
                     base_obs=base_obs,
-                    nav_file=nav_file,
+                    nav_files=nav_files,
                     out_path=out_path,
                     config_file=config,
                     sbs_file=sbs_file,
@@ -2128,11 +2192,11 @@ def ppk(
     pos, results = read_rnx2rtkp_out(out)
     quality_conversion = np.sum(results["quality"] == 1) / len(results["quality"]) * 100
     print(f"Quality conversion: Q1 = {quality_conversion:.2f} %")
-    print()
 
     results["sp3"] = sp3_file if sp3_file and sp3_file.is_file() else None
     results["clk"] = clk_file if clk_file and clk_file.is_file() else None
 
+    print()
     return pos, results
    
 def station_ppp(

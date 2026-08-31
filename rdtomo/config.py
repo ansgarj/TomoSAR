@@ -1,3 +1,4 @@
+from __future__ import annotations
 from pathlib import Path
 import json
 from collections import defaultdict
@@ -13,7 +14,7 @@ SETTINGS_PATH = LOCAL / "settings.json"
 class Frequencies:
     __slots__ = ('BANDS', 'BANDWIDTHS', 'CENTRAL_FREQUENCIES', 'UNIT')
 
-    def __init__(self) -> None:
+    def __init__(self) -> Frequencies:
         st = Settings()
         object.__setattr__(self, "BANDS", tuple(
             st.RADAR["POLARIZATIONS"].keys()
@@ -58,7 +59,7 @@ class Frequencies:
 class Beam:
     __slots__ = ("BAND_POLARIZATIONS", "BEAMWIDTHS", "DEPRESSION_ANGLES", "UNIT")
 
-    def __init__(self) -> None:
+    def __init__(self) -> Beam:
         st = Settings()
         object.__setattr__(self, "BAND_POLARIZATIONS", tuple(
             (band, pol) for band, pol_list in st.RADAR["POLARIZATIONS"].items() for pol in pol_list
@@ -102,12 +103,41 @@ class Beam:
 
 # Settings
 class Settings:
-    _implemented_frames = ["ITRF2020", "ITRF", "ETRF2020", "ETRF", "SWEREF99", "SWEREF", "EUREF-FIN", "FINREF",
-                           "EUREF-DK94", "DKREF", "LKS-94", "LITREF", "LKS-92", "LATREF", "EUREF-EST97", "ESTREF",
-                           "EUREF89", "NOREF"]
+    _implemented_frames = ["ITRF2020", "ETRF2020", "SWEREF99", "EUREF-FIN",
+                           "EUREF-DK94", "LKS-94", "LKS-92", "EUREF-EST97",
+                           "EUREF89"]
+    
+    _aliases = {
+        "ITRF": "ITRF2020",
+        "ETRF": "ETRF2020"
+    }
 
-    __slots__ = ("data")
-    def __init__(self) -> None:
+    _locations = {
+        "WGS84": "ITRF",
+        "EUROPE": "ETRF",
+        "SWEDEN": "SWEREF99",
+        "FINLAND": "EUREF-FIN",
+        "DENMARK": "EUREF-DK94",
+        "LITHUANIA": "LKS-94",
+        "LATVIA": "LKS-92",
+        "ESTONIA": "EUREF-EST97",
+        "NORWAY": "EUREF89"
+    }
+    
+    _instance = None
+
+    __slots__ = ("data", "_initialized")
+
+    def __new__(cls) -> Settings:
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+        return cls._instance
+    
+    def __init__(self) -> Settings:
+        if getattr(self, "_initialized", False):
+            return
+        self._initialized = True
+
         if SETTINGS_PATH.is_file():
             with open(SETTINGS_PATH, "r") as file:
                 self.data = json.load(file)
@@ -120,30 +150,18 @@ class Settings:
         if not rf:
             rf = self.TARGET_FRAME
         
+        rf = rf.upper()
+        # Interpret location
+        if rf in self._locations:
+            rf = self._locations[rf]
+
+        # Interpret aliases
+        if rf in self._aliases:
+            rf = self._aliases[rf]
+
         # Verify implementation
-        if not rf in self._implemented_frames:
-            raise NotImplementedError(f"The reference frame {rf} is not implemented. Implemented frames: {self._implemented_frames}")
-        
-        # Aliases
-        match rf:
-            case "ITRF":
-                rf = "ITRF2020"
-            case "ETRF":
-                rf = "ETRF2020"
-            case "SWEREF":
-                rf = "SWEREF99"
-            case "FINREF":
-                rf = "EUREF-FIN"
-            case "DKREF":
-                rf = "EUREF-DK94"
-            case "LITREF":
-                rf = "LKS-94"
-            case "LATREF":
-                rf = "LKS-92"
-            case "ESTREF":
-                rf = "EUREF-EST97"
-            case "NOREF":
-                rf = "EUREF89"
+        if rf not in self._implemented_frames:
+            raise NotImplementedError(f"The reference frame {rf} cannot be found in the list of implemented frames, aliases or canonical locations.\nImplemented frames: {self._implemented_frames}\nAliases: {self._aliases}\nCanonical locations: {self._locations}")
         
         return rf
     
@@ -323,7 +341,7 @@ class Settings:
         self.data["SWEPOS_COORDINATES"] = str(path.resolve())
 
     @property
-    def FILES(self) -> dict:
+    def FILES(self) -> dict[str, dict[str, str|list[str]|dict[str, str]]]:
         return self.data["FILES"]
 
     def add(self, key: str, files: str|Path|list[str|Path], **kwargs) -> None:
@@ -402,16 +420,16 @@ class Settings:
             self.FILES[key].pop(rf)
 
     @property
-    def DEMS(self) -> dict[str, list[str]]:
-        return self.FILES["DEMS"]
+    def DEMS(self) -> list[str]:
+        return self.FILES["DEMS"][self.TARGET_FRAME]
        
     @property
-    def CANOPIES(self) -> dict[str, list[str]]:
-        return self.FILES["CANOPIES"]
+    def CANOPIES(self) -> list[str]:
+        return self.FILES["CANOPIES"][self.TARGET_FRAME]
     
     @property
-    def MASKS(self) -> dict[str, list[str]]:
-        return self.FILES["MASKS"]
+    def MASKS(self) -> list[str]:
+        return self.FILES["MASKS"][self.TARGET_FRAME]
     
     @property
     def ANTENNAS(self) -> dict:

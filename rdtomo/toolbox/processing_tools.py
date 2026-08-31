@@ -12,7 +12,7 @@ from ..forging import tomoforge
 from ..data import LoadDir, DataDir, ProcessingDir
 
 @click.command()
-@click.argument("path", type=click.Path(exists=True, file_okay=False, path_type=LoadDir), default=LoadDir.cwd())
+@click.argument("path", type=click.Path(exists=True, file_okay=False, path_type=LoadDir), default=None)
 @click.option("--swepos", "use_swepos", is_flag=True, help="Substitute for base OBS with files from nearest Swepos station")
 @click.option("--ppp", "use_ppp", is_flag=True, help="Subsitute for mocoref data by running static PPP on base OBS")
 @click.option("-z", "-zip", "is_zip", is_flag=True, help="Force base OBS and mocoref.moco files to be generated from a Reach ZIP archive")
@@ -38,7 +38,7 @@ from ..data import LoadDir, DataDir, ProcessingDir
 @click.option("--dry", is_flag=True, help="Force the specified PATH to be interpreted as a processing directory")
 @click.option("-t", "--tag", default = "", flag_value=date.today().strftime('%Y%m%d'), help="Tag processing directory with specified string (default: the date of today)")
 def init(
-    path: LoadDir,
+    path: LoadDir|None,
     force: bool,
     use_swepos: bool,
     use_ppp: bool,
@@ -94,6 +94,8 @@ def init(
     Use --tag to append the date the processing folder was initiated to the folder name (otherwise copied from the data directory), or --tag=STRING
     to append some other tag."""
 
+    if not path:
+        path = LoadDir.cwd()
     print(f"Type of {path}: {type(path)}")
     if not isinstance(path, (DataDir, ProcessingDir)):
         raise TypeError(f"You can only run rdtomo init on DataDir and ProcessingDir folders: {path} is a {type(path)}")
@@ -259,13 +261,11 @@ def station_ppp(
 @click.option("-l", "--linear", type=int, default=0, help="Specify linear track index to modify radar-[...].inf (0 for spiral flights)")
 @click.option("-v", "--verbose", is_flag=True, help="Print detailed output")
 @click.option("-d", "--dry", is_flag=True, help="Don't save or modify files")
-@click.option("--dem", type=click.Path(exists=True, path_type=Path), default=None, help="Path to DEM file or folder to combine with DEMS_GROUND")
 @click.option("--npar", type=int, default=None, help="Number of parallel processes (default: CPU count)")
-def trackfinder(path, linear, verbose, dry, dem, npar) -> None:
-    """Run trackfinder on a .moco file containing integrated GNSS and IMU data."""
+def trackfinder(path, linear, verbose, dry, npar) -> None:
+    """Run trackfinder on a imu_logger_dat-[...].mocob file containing integrated GNSS and IMU data."""
     run_trackfinder(
         path=path,
-        dem_path=dem,
         linear=linear,
         verbose=verbose,
         dry=dry,

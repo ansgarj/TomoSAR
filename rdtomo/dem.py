@@ -4,17 +4,19 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import rasterio 
 from pyproj import Transformer
+import xml.etree.ElementTree as ET
+import os
 
 from .utils import leap_seconds, warn
-from .coords import geo_to_ecef, ecef_to_geo, change_rf
 from .config import Settings, LOCAL
 from .manager import build_vrt
+from .position import Pos
 
 # Get elevation from DEMs for a point
-def elevation(lat: float, lon: float, dem_path: Path|str = None) -> float | None:
+def elevation(point: Pos, dem_path: Path|str = None) -> float | None:
     """Returns the elevation for a specific point from the highest resolved DEM at that point,
     or from the user specified DEM."""
-    def  get_dem() -> tuple[np.ndarray, rasterio.DatasetReader]:
+    def  get_elevation(dem_path: Path) -> float|None:
         def _check_file_type(filename: Path) -> str:
             ext = filename.suffix.lower()
             if ext in [".tif", ".tiff"]:
@@ -23,18 +25,21 @@ def elevation(lat: float, lon: float, dem_path: Path|str = None) -> float | None
                 return "VRT"
             else:
                 return "Unknown"
-        file_type = _check_file_type(dem_path)
-        def _point_in_bounds(src: rasterio.DatasetReader) -> bool:
-            bounds = src.bounds
-            try:
-                transformer = Transformer.from_crs("EPSG:4326", src.crs, always_xy=True)
-                x, y = transformer.transform(lon, lat)
-                return bounds.left <= x <= bounds.right and bounds.bottom <= y <= bounds.top
-            except Exception:
-                return False
-
-        import xml.etree.ElementTree as ET
-        import os
+        
+        def _point_in_bounds(src: rasterio.DatasetReader) -> tuple[float, float]|None:
+            match src.crs:
+                case point.frame.proj_crs(lat=point.lat, lon=point.lon):
+                    x, y = point.easting[0], point.northing[0]
+                case point.frame.geo_crs:
+                    x, y = point.lon[0], point.lat[0]
+                case _:
+                    try:
+                        x, y = Transformer.from_crs(point.frame.geo_crs, src.crs, always_xy=True).transform(point.lon[0], point.lat[0])    
+                    except Exception:
+                        return None
+            if src.bounds.left <= x <= src.bounds.right and src.bounds.bottom <= y <= src.bounds.top:
+                return (x,y)
+            return None
 
         def _normalize_path(path: Path) -> Path:
             """
@@ -51,7 +56,7 @@ def elevation(lat: float, lon: float, dem_path: Path|str = None) -> float | None
             # Resolve if possible
             return Path(expanded).resolve()
 
-        def _find_raster_in_vrt(vrt_path: Path, lat: float, lon: float) -> str | None:
+        def _find_raster_in_vrt(vrt_path: Path) -> tuple[str|None, tuple[float,float]|None]:
             tree = ET.parse(vrt_path)
             root = tree.getroot()
 
@@ -70,50 +75,53 @@ def elevation(lat: float, lon: float, dem_path: Path|str = None) -> float | None
 
                 try:
                     with rasterio.open(full_path) as src:
-                        if _point_in_bounds(src, lat, lon):
-                            return full_path
+                        coords = _point_in_bounds(src)
+                        if coords:
+                            return full_path, coords
                 except Exception:
                     continue
 
-            return None
+            return None, None
 
+        # Begin get_dem function
+        file_type = _check_file_type(dem_path)
         if file_type == "TIFF":
             with rasterio.open(dem_path) as src:
-                if _point_in_bounds(src, lat, lon):
+                coords = _point_in_bounds(src)
+                if coords:
                     dem = src.read(1)
-                    return dem, src
+                    return dem[coords]
                 else:
-                    return np.array([]), None
+                    return None
         
         elif file_type == "VRT":
-            raster_path = _find_raster_in_vrt(dem_path, lat, lon)
+            raster_path, coords = _find_raster_in_vrt(dem_path)
             if raster_path:
                 with rasterio.open(raster_path) as src:
                     dem = src.read(1)
-                    return dem, src
+                    return dem[coords]
             else:
-                return np.array([]), None
+                return None
         
         else:
-            return np.array([]), None
+            return None
     
+    # Begin main function
     dem_path = Path(dem_path)
     if dem_path.is_file():
-        dem, src = get_dem()
+        result = get_elevation(dem_path)
     else:
-        vrt_path = LOCAL / "DEM.vrt"
-        dem_path = build_vrt(vrt_path, Settings().DEMS)
+        settings = Settings()
+        vrt_path = LOCAL / f"{settings.TARGET_FRAME}_DEM.vrt"
+        dem_path = build_vrt(vrt_path, settings.DEMS)
         
-        dem, src = get_dem()    
+        result = get_elevation(dem_path)    
+    if not result:
+        warn(f"No DEM found for coordinates {point}")
 
-    if src:
-        x, y = src.index(lon, lat)
-        return dem[x,y]
-    else:
-        warn(f"No DEM found for coordinates ({lat}, {lon})")
-        return None
+    return result
+
  
-
 def las_acquisition_time(las_path: str, reference_date: datetime) -> datetime:
     """
     Extract median acquisition timestamp from LAS file using GPS time.
@@ -168,117 +176,4 @@ def las_acquisition_time(las_path: str, reference_date: datetime) -> datetime:
     # print(f"Detected GPS time format: {fmt}")
     
     return epoch
-
-import rasterio
-import numpy as np
-from rasterio.warp import reproject, Resampling
-from rasterio.transform import from_bounds
-from scipy.interpolate import griddata
-
-def dem_warp(dem_path, geoid_path, out_path, epoch, output_res=None) -> np.ndarray:
-    """
-    Apply Helmert transformation to DEM with orthometric heights and warp to new grid.
-    Output is ellipsoidal heights in EPSG:4326.
-    
-    Parameters:
-        dem_path: Path to DEM raster (orthometric heights).
-        geoid_path: Path to geoid raster (global EPSG:4326).
-        out_path: Output raster path.
-        epoch: Epoch for Helmert transformation (float or datetime).
-        output_res: Resolution in degrees (tuple: (lon_res, lat_res)). If None, match original approx.
-    """
-    with rasterio.open(dem_path) as dem_src:
-        dem = dem_src.read(1).astype(np.float64)
-        nodata = dem_src.nodata
-        transform = dem_src.transform
-        profile = dem_src.profile
-        height, width = dem.shape
-
-        # Resample geoid to DEM grid
-        with rasterio.open(geoid_path) as geoid_src:
-            geoid_resampled = np.empty_like(dem, dtype=np.float64)
-            reproject(
-                source=rasterio.band(geoid_src, 1),
-                destination=geoid_resampled,
-                src_transform=geoid_src.transform,
-                src_crs=geoid_src.crs,
-                dst_transform=transform,
-                dst_crs=dem_src.crs,
-                resampling=Resampling.bilinear
-            )
-
-        # Compute original lon/lat grid
-        rows, cols = np.indices(dem.shape)
-        xs, ys = rasterio.transform.xy(transform, rows, cols)
-        lon = np.array(xs).flatten()
-        lat = np.array(ys).flatten()
-        ortho_h = dem.flatten()
-        geoid_h = geoid_resampled.flatten()
-
-        # Mask nodata and NaNs
-        if nodata is None:
-            mask = ~np.isnan(ortho_h) & ~np.isnan(geoid_h)
-        else:
-            mask = (ortho_h != nodata) & ~np.isnan(ortho_h) & ~np.isnan(geoid_h)
-
-        # Convert orthometric -> ellipsoidal
-        ellipsoid_h = ortho_h[mask] + geoid_h[mask]
-
-        # Apply transformations
-        X, Y, Z = geo_to_ecef(lon[mask], lat[mask], ellipsoid_h, rf="SWEREF99")
-        Xh, Yh, Zh = change_rf("SWEREF99", "ITRF2020", X, Y, Z, epoch=epoch)
-        lon_new, lat_new, ellipsoid_h_new = ecef_to_geo(Xh, Yh, Zh, rf="ITRF2020")
-
-        # Remove NaNs before interpolation
-        valid = ~np.isnan(lon_new) & ~np.isnan(lat_new) & ~np.isnan(ellipsoid_h_new)
-        lon_new, lat_new, ellipsoid_h_new = lon_new[valid], lat_new[valid], ellipsoid_h_new[valid]
-
-
-        # Determine output grid
-        if output_res is None:
-            # Approximate resolution from original
-            lon_res = abs(transform.a)
-            lat_res = abs(transform.e)
-        else:
-            lon_res, lat_res = output_res
-
-        # Compute new bounds
-        min_lon, max_lon = lon_new.min(), lon_new.max()
-        min_lat, max_lat = lat_new.min(), lat_new.max()
-
-        out_width = int((max_lon - min_lon) / lon_res)
-        out_height = int((max_lat - min_lat) / lat_res)
-
-        out_transform = from_bounds(min_lon, min_lat, max_lon, max_lat, out_width, out_height)
-
-        # Interpolate onto new grid
-        grid_lon = np.linspace(min_lon, max_lon, out_width)
-        grid_lat = np.linspace(min_lat, max_lat, out_height)
-        grid_lon_mesh, grid_lat_mesh = np.meshgrid(grid_lon, grid_lat)
-
-        fill_val = np.nan if nodata is None else nodata
-
-        out_data = griddata(
-            points=(lon_new, lat_new),
-            values=ellipsoid_h_new,
-            xi=(grid_lon_mesh, grid_lat_mesh),
-            method='linear',
-            fill_value=fill_val
-)
-
-        # Write output raster
-        profile.update({
-            "crs": "EPSG:4326",
-            "transform": out_transform,
-            "width": out_width,
-            "height": out_height,
-            "dtype": "float64",
-            "nodata": fill_val
-        })
-
-        with rasterio.open(out_path, "w", **profile) as dst:
-            dst.write(out_data, 1)
-
-    print(f"Warped ellipsoidal DEM written to {out_path}")
-    return out_data
 

@@ -30,3 +30,7 @@ __pycache__/
 # Temporary files
 *.tmp
 *.temp
+
+# WIP folder(s)
+WIP/
+rdtracking/
