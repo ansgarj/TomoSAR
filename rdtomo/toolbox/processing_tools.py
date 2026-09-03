@@ -36,7 +36,7 @@ from ..data import LoadDir, DataDir, ProcessingDir
 @click.option("-k", "--config", type=click.Path(exists=True, path_type=Path), default=None, help="Specify external config file for rnx2rtkp")
 @click.option("-f", "--force", is_flag=True, help="Force generation of processing directory (this may overwrite existing directories, but has no effect if PATH is a processing directory)")
 @click.option("--dry", is_flag=True, help="Force the specified PATH to be interpreted as a processing directory")
-@click.option("-t", "--tag", default = "", flag_value=date.today().strftime('%Y%m%d'), help="Tag processing directory with specified string (default: the date of today)")
+@click.option("-t", "--tag", default = "", help="Tag processing directory with specified string")
 def init(
     path: LoadDir|None,
     force: bool,
@@ -96,14 +96,15 @@ def init(
 
     if not path:
         path = LoadDir.cwd()
-    print(f"Type of {path}: {type(path)}")
+
     if not isinstance(path, (DataDir, ProcessingDir)):
         raise TypeError(f"You can only run rdtomo init on DataDir and ProcessingDir folders: {path} is a {type(path)}")
     
     
     if isinstance(path, DataDir):
-        processing_dir = Settings().PROCESSING_DIRS / (path.name + "_" + tag)
-        processing_dir.mkdir(exist_ok=force)
+        processing_dir = Settings().PROCESSING_DIRS / path.name
+        if tag:
+            processing_dir += "_" + tag
 
         path = path.init(
                 processing_dir=processing_dir,

@@ -60,7 +60,7 @@ class ReferenceFrame:
     
     def __eq__(self, other: object) -> bool:
         if isinstance(other, str):
-            return self.name == other
+            return self.name == ReferenceFrame(other).name
         if isinstance(other, ReferenceFrame):
             return self.name == other.name
         return NotImplemented
@@ -687,12 +687,12 @@ class Pos:
     @property
     def easting(self) -> npt.NDArray[np.floating]:
         """Projected easting"""
-        return self.map[:,0]
+        return self.proj[:,0]
     
     @property
     def northing(self) -> npt.NDArray[np.floating]:
         """Projected northing"""
-        return self.map[:,1]
+        return self.proj[:,1]
     
     @property
     def enu_rotation(self) -> npt.NDArray[np.floating]:
@@ -718,7 +718,7 @@ class Pos:
             if retain_geo and self._llh is not None:
                 cp._llh = self.geo
         elif retain_geo and self._llh is not None:
-            cp = Pos().geodetic(*self.igeo(), self.t, epoch=self.epoch, frame=self.frame)
+            cp = Pos(*self.igeo(), self.t, epoch=self.epoch, frame=self.frame, geodetic=True)
         else:
             raise ValueError("Coordinates defined in neither ECEF nor Geodetic system")
         if retain_proj and self._map is not None:
@@ -787,7 +787,7 @@ class Pos:
                 elif geo.ndim == 2:
                     pos._llh = geo
         elif self._llh is not None:
-            pos = Pos(*self.geo[idx].T, self.t, epoch=self.epoch, frame=self.frame, geodetic=True)
+            pos = Pos(*self.geo[idx].T, self.t[idx], epoch=self.epoch, frame=self.frame, geodetic=True)
         if self._map is not None:
             map = self.map[idx]
             if map.ndim == 1:

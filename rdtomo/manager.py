@@ -89,11 +89,16 @@ def gdl(gdl_cmd: str|list, capture: bool = False, mult: bool = False) -> subproc
     cmd = ["gdl", "-q", "-e"]
 
     # Convert GDL command to single string
+    if len(gdl_cmd) == 1:
+        gdl_cmd = gdl_cmd[0]
     if isinstance(gdl_cmd, list):
+        gdl_cmd = [local(part) if isinstance(part, Path) else str(part) for part in gdl_cmd]
         if mult:
             gdl_cmd = " & ".join(gdl_cmd)
         else:
-            gdl_cmd = ",".join(gdl_cmd)
+            gdl_cmd = gdl_cmd[0] + "," + ",".join(repr(x) for x in gdl_cmd[1:])
+    else:
+        gdl_cmd = local(gdl_cmd) if isinstance(gdl_cmd, Path) else str(gdl_cmd)
 
     cmd.append(gdl_cmd)
     if Settings().VERBOSE:

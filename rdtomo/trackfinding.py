@@ -15,9 +15,10 @@ import json
 from matplotlib.figure import Figure
 from typing import Type, TypeVar, overload, Iterable
 from abc import ABC, abstractmethod
+import re
 
-from .utils import Angles, IndexType, find_inliers, format_duration, add_meta, parse_datetime_string, gpst_to_dt, gpst, srf, slice_mask
-from .position import Pos, DeltaPos
+from .utils import Angles, IndexType, find_inliers, format_duration, add_meta, parse_datetime_string, gpst_to_dt, gpst, srf_reader, ascii_reader, slice_mask, infer_rf
+from .position import Pos, DeltaPos, ReferenceFrame
 from .dem import elevation as get_elevation
 from .apperture import SARModel
 from .config import Frequencies, Settings
@@ -91,14 +92,14 @@ class RawFlight:
         self._pitch = pitch
 
     @classmethod
-    def from_log(cls: Type[FlightType], data: np.ndarray, reference_date: datetime) -> FlightType:
+    def from_log(cls: Type[FlightType], data: np.ndarray, reference_date: datetime, reference_frame: str|ReferenceFrame = "ITRF2020") -> FlightType:
         """Initiates a FlightType instance from a unimoco log."""
         # Initiate position
         dt = gpst_to_dt(data[:,0], reference_date=reference_date)
         lat = data[:,1]
         lon = data[:,2]
         alt = data[:,3]
-        pos = Pos(lon, lat, alt, dt, frame="ITRF", geodetic=True)
+        pos = Pos(lon, lat, alt, dt, frame=reference_frame, geodetic=True)
 
         # Initiate velocity
         vn = data[:,4]
@@ -771,7 +772,7 @@ class Irregular(Track):
         return f"IrregularTrack({len(self.pos)} data points)"
     
 # Find flights
-def find_flights(data: np.ndarray, reference_date: datetime) -> list[Flight]:
+def find_flights(data: np.ndarray, reference_date: datetime, reference_frame: str|ReferenceFrame = "ITRF2020") -> list[Flight]:
     
     # Parameters
     minimum_flight_alt = 30  # meters
@@ -804,7 +805,7 @@ def find_flights(data: np.ndarray, reference_date: datetime) -> list[Flight]:
     idx = data[:,3] > (ground_alt + minimum_flight_alt)
 
     # Extract flights
-    flights = [Flight.from_log(data[s, :], reference_date) for s in slice_mask(idx)]
+    flights = [Flight.from_log(data[s, :], reference_date, reference_frame) for s in slice_mask(idx)]
 
     # Remove spurious flights
     flights = [flight for flight in flights if flight.dur() > minimum_flight_dur]
@@ -927,7 +928,7 @@ def plot_tracks(
     return fig, axes
 
 # Modify the radar[...].inf file
-def modify_radar_inf(path: Path, info: dict, dry: bool = False) -> Path:
+def modify_radar_inf(path: Path, info: dict, dt: datetime|None = None, dry: bool = False) -> Path:
     """
     Modify radar_logger_dat-[...].inf file with new track timestamps.
     
@@ -942,8 +943,13 @@ def modify_radar_inf(path: Path, info: dict, dry: bool = False) -> Path:
             continue
         t_start.append(ts['t_start'])
         t_end.append(ts['t_end'])
-    folder = path.parent
-    dt = parse_datetime_string(path.name[17:36])
+    folder = path.parent.parent / "radar1"
+    if not dt:
+        match = re.search(r'(\d{4}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2})', path.name)
+        if match:
+            dt = parse_datetime_string(match.group(1), require_datetime=True)
+        else:
+            raise RuntimeError(f"The file path does not contain a timestamp string, and none was provided: {path}")
     base_name = f"radar_logger_dat-{dt.strftime("%Y-%m-%d-%H-%M-%S")}.inf"
     inf_path = folder / base_name
 
@@ -1005,7 +1011,7 @@ def trackfinder(
         dry: bool = False,
         npar: int = os.cpu_count()
 ) -> list[Spiral]:
-    """Reads a radar_logger_dat-[...].mocob file and segments it to find flights and identify their tracks, classified as 
+    """Reads a moco file and segments it to find flights and identify their tracks, classified as 
     - Spiral: the track consists of the spiral part of the flight,
     - Linear: the track consists of the parallel linear segments,
     - Irregular: the track consists of the entire flight.
@@ -1016,32 +1022,45 @@ def trackfinder(
     
     Returns a list of Spirals by default, or the Linear segments of the track if the linear parameter is non-zero."""
 
-    # 1. Read file into DataFrame and get base altitude
     path=Path(path)
+    print("Running trackfinder ...")
 
-    ## Get date and timestamp as strings for file naming
-    dt = parse_datetime_string(path.name[17:36])
-    
-    print(f"Segmenting log: {path}", flush=True)
-    data = srf(path)
+    # Get date and timestamp
+    match = re.search(r'(\d{4}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2})', path.name)
+    if match:
+        dt = parse_datetime_string(match.group(1), require_datetime=True)
+    else:
+        raise RuntimeError(f"The file path does not contain a timestamp string: {path}")
+
+
+    # 1. Get data and reference frame
+    print(f"--> Segmenting log: {path}", flush=True)
+    try:
+        data, rf = srf_reader(path)
+    except RuntimeError:
+        data, header, _ = ascii_reader(path)
+        data = data[:,:10]
+        rf, _ = infer_rf(header)
+
+    rf = ReferenceFrame(rf)
+    print(f"--> Working in reference frame: {rf}")
 
     # 2. Find flights
-    flights, base_ele = find_flights(data, dt)
-    print(f"{len(flights)} flights found ...", flush=True)
+    flights, base_ele = find_flights(data, dt, rf)
+    print(f"--> {len(flights)} flights found ...", end=" ", flush=True)
 
     # 3. Find tracks
     counters = find_tracks(flights, npar=npar)
-    print(f' > {counters['spiral']} spiral,')
-    print(f' > {counters['linear']} linear', end="")
+    print(f'{counters['spiral']} spiral, {counters['linear']} linear', end="")
     if counters['irregular'] > 0:
-        print(f',\n > {counters['irregular']} irregular.')
+        print(f', and {counters['irregular']} irregular.')
     else:
         print(".")
 
-    # 5. Perform rudimentary analysis of tracks
-    print("\nAnalyzing tracks ...", end=" ", flush=True)
+    # 4. Perform rudimentary analysis of tracks
+    print("--> Analyzing tracks ...", end=" ", flush=True)
     flight_info = analyze_tracks(flights, base_ele=base_ele)
-    print("done.\n")
+    print("done.")
 
     meta_str = "Altitude is counted relative the base position (take off)."
     flight_info = add_meta(flight_info, meta_str)
@@ -1049,24 +1068,24 @@ def trackfinder(
     if verbose or Settings().VERBOSE:
         print(json.dumps(flight_info, indent=4))
 
-    ## 6. Plot tracks
+    ## 5. Plot tracks
     fig, axes = plot_tracks(flights, suptitle=f"{dt.strftime("%Y-%m-%d")}: tracks")
     if dry:
         plt.show()
    
-    # 7. File generation
+    # 6. File generation
     else:
         # Save plot of tracks
-        fig_path = path.with_name(dt.strftime("%Y-%m-%d-%H-%M-%S-trackfinder.pdf"))
+        fig_path = path.with_name(dt.strftime("%Y-%m-%d-%H-%M-%S-trackfinder.svg"))
         fig.savefig(fig_path)
-        print(f"Plot of tracks saved to {fig_path}", flush=True)
+        print(f"--> Plot of tracks saved to {fig_path}", flush=True)
         
         # Modify radar_inf file
         if linear == 0:
-            inf_path = modify_radar_inf(path, flight_info['Spirals'], dry=dry)
+            inf_path = modify_radar_inf(path, flight_info['Spirals'], dt=dt, dry=dry)
         elif linear:
-            inf_path = modify_radar_inf(path, flight_info[f'Linear_{linear}'], dry=dry)
-        print(f"Timestamps saved to {inf_path}", flush=True)
+            inf_path = modify_radar_inf(path, flight_info[f'Linear_{linear}'], dt=dt, dry=dry)
+        print(f"--> Timestamps saved to {inf_path}", flush=True)
         
         # Save flight_info
         result = f"{len(flights)} flights found: {counters['spiral']} spiral, {counters['linear']} linear"
@@ -1078,10 +1097,10 @@ def trackfinder(
         fi_path = path.with_name(dt.strftime("%Y-%m-%d-%H-%M-%S-flight_info.json"))
         with open(fi_path, 'w') as f:
             json.dump(flight_info, f, indent=4)
-        print(f"Information about tracks saved to {fi_path}", flush=True)
+        print(f"--> Information about tracks saved to {fi_path}", flush=True)
 
         # Save tracks:
-        print(f"Saving tracks ...", flush=True)
+        print(f"--> Saving tracks ...", flush=True)
         n_spiral = 0
         n_linear = 0
         for flight in flights:
@@ -1091,7 +1110,7 @@ def trackfinder(
             elif flight.type == 'Linear':
                 n_linear += 1
                 file_name = path.with_name(dt.strftime(f"%Y-%m-%d-%H-%M-%S-{n_linear:02}-linear_track.npz"))
-            print(f" > {file_name}")
+            print(f"     > {file_name}")
             flight.track.save(file_name)
             
     print("All done.")

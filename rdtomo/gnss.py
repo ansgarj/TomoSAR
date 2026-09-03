@@ -18,7 +18,7 @@ from sklearn.cluster import DBSCAN
 
 from .version import version
 from .config import Settings
-from .utils import prompt_ftp_login, gunzip, warn, local, string_sub, date_to_gps_week, gps_week_to_date, leap_seconds, parse_datetime_string
+from .utils import prompt_ftp_login, gunzip, warn, local, string_sub, date_to_gps_week, gps_week_to_date, leap_seconds, parse_datetime_string, ascii_reader, infer_rf, ascii_writer
 from .manager import run, tmp, resource, modify_config
 from .position import Pos, ReferenceFrame, DeltaPos
 
@@ -152,6 +152,7 @@ def merge_rnx(rnx_files: list[str|Path], force: bool = False, output_dir: Path|s
 
 def ubx2rnx(ubx_file: str|Path, nav: bool = True, sbs: bool = True, obs_file: str|Path|None = None) -> tuple[Path, Path|None, Path|None]:
     """Convert a UBX file (drone gnss_logger_dat-[...].bin file) to RINEX."""
+    ubx_file = Path(ubx_file)
     if obs_file:
         obs_path = Path(obs_file)
     else:
@@ -1330,9 +1331,13 @@ def merge_swepos_rinex(files: list[str|Path], output_dir: Path) -> tuple[Path|No
     return merged_obs, merged_nav
 
 # Read output
-def read_rnx2rtkp_out(input: str|Path) -> tuple[Pos, dict]:
+def read_rnx2rtkp_out(input: str|Path, frame_corr: bool = True) -> tuple[Pos, dict]:
     """Parses a rnx2rtkp .pos file. A string is interpreted to be the content of the .pos file:
     to pass the path convert it to a Path object first.
+
+    NOTE: This function will automatically correct the position to match TARGET_FRAME from settings
+    and overwrite the old file. The reference frame is saved in a header line ('% REF FRAME :   <RF>')\
+    for future reference. This behaviour can be turned off by running with frame_corr=False)
 
     Returns:
         - pos: position of rover as Pos object
@@ -1342,56 +1347,7 @@ def read_rnx2rtkp_out(input: str|Path) -> tuple[Pos, dict]:
             - "gps_week": GPS week of each point
             - "gpst": GPST (s) of each point, as seconds into current week
             - "quality": Q number
-            - "path": Path object pointing to file with frame corrected position, or None if just the
-                content (a string) was passed
     """
-
-    def infer_formats(line: str) -> list[str]:
-        tokens = line.split()
-        formats = []
-
-        for tok in tokens:
-            if "e" in tok or "E" in tok:
-                # scientific notation
-                base, exp = tok.split("e") if "e" in tok else tok.split("E")
-                decimals = len(base.split(".")[1]) if "." in base else 0
-                width = len(tok)
-                formats.append(f"%{width}.{decimals}e")
-            elif "." in tok:
-                decimals = len(tok.split(".")[1])
-                width = len(tok)
-                formats.append(f"%{width}.{decimals}f")
-            else:
-                width = len(tok)
-                formats.append(f"%{width}d")
-
-        return formats
-    
-    if isinstance(input, str):
-        lines = input.splitlines()
-    elif isinstance(input, Path):
-        with open(input, 'r') as f:
-            lines = f.readlines()
-
-    # Skip header lines
-    header_lines = []
-    for i in range(len(lines)):
-        line = lines[i]
-        if line.startswith('%'):
-            header_lines.append(line)
-        else:
-            fmt = infer_formats(line)
-            break
-    data_lines = lines[i:]
-
-    # Parse numeric data
-    try:
-        data = [list(map(float, line.split())) for line in data_lines]
-        data = np.array(data)
-    except ValueError:
-        raise ValueError(f"Could not parse numeric data from {input}")
-
-    # Constants
     def get_epoch(gps_array: np.ndarray) -> np.ndarray:
         """
         Convert GPS week and seconds-of-week to decimal years (UTC).
@@ -1415,12 +1371,21 @@ def read_rnx2rtkp_out(input: str|Path) -> tuple[Pos, dict]:
 
         decimal_years = years + seconds_into_year / year_length
         return decimal_years
-    
+
+    # Target Reference Frame
+    target_rf = Settings().TARGET_FRAME
+
+    data, header_lines, fmt = ascii_reader(input, content=isinstance(input, str))
+    file_rf, header_lines = infer_rf(header_lines, new_rf=target_rf)
+
+    # Set file_rf to ITRF if not given
+    if file_rf is None:
+        file_rf = "ITRF2020"
+
     # Auto-detect coordinate columns
-    results = {}
-    rf = Settings().TARGET_FRAME
+    results = {}  
     if data.shape[1] >= 5:
-        pos = Pos(np.hstack((data[:,2:5], get_epoch(data[:, 0:2]).reshape(-1,1))), frame="ITRF").reframe(rf)
+        pos = Pos(np.hstack((data[:,2:5], get_epoch(data[:, 0:2]).reshape(-1,1))), frame=file_rf).reframe(target_rf)
         results["SD"] = DeltaPos(data[:, [8,7,9]])      # ENU SD
         results["ratio"] = data[:, 14]                  # AR ratio
         results["gps_week"] = data[:, 0]                # GPS week
@@ -1429,19 +1394,10 @@ def read_rnx2rtkp_out(input: str|Path) -> tuple[Pos, dict]:
     else:
         raise ValueError(f"Unexpected format in {input}: not enough columns")
     
-    # Insert frame corrected position into data and write file
-    if isinstance(input, Path):
+    # Insert frame corrected position into data and rewrite file
+    if isinstance(input, Path) and frame_corr:
         data[:,2:5] = pos.coords
-        out_path = input.with_suffix(f".{rf}.pos")
-        with open(out_path, "w") as f:
-            for line in header_lines:
-                f.write(line)
-
-            np.savetxt(f, data, fmt=fmt)
-    
-        results["path"] = out_path
-    else:
-        results["path"] = None
+        ascii_writer(input, data, header_lines, fmt, {"GPST": 2})
 
     return pos, results
 
@@ -1735,10 +1691,10 @@ def generate_mocoref(
                 if line > len(data):
                     raise IndexError(f"The line {line} does not exist in data.")
                 
-                mocoref_latitude = data[settings.MOCOREF_LATITUDE].iloc[line - 1]
-                mocoref_longitude = data[settings.MOCOREF_LONGITUDE].iloc[line - 1]
-                mocoref_height = data[settings.MOCOREF_HEIGHT].iloc[line - 1]
-                mocoref_antenna = data[settings.MOCOREF_ANTENNA].iloc[line - 1]
+                mocoref_latitude = data[settings.MOCOREF_LATITUDE].iloc[line]
+                mocoref_longitude = data[settings.MOCOREF_LONGITUDE].iloc[line]
+                mocoref_height = data[settings.MOCOREF_HEIGHT].iloc[line]
+                mocoref_antenna = data[settings.MOCOREF_ANTENNA].iloc[line]
 
                 # Modify antenna offset to account for difference between mocorec receiver and receiver used for processing:
                 mocoref_antenna = mocoref_antenna + pco_diff
@@ -2113,7 +2069,7 @@ def ppk(
                         case '3':
                             print("With frequencies: L1+L2+L5")
                 else:
-                    warn("No callibration data available. Using all available constellations and frequencies.")
+                    warn("No callibration data available for base antenna.\nUsing all available constellations and frequencies.")
     
     with resource(config_file, "PPK_CONFIG", antenna=antenna_type, radome=radome, satellites=atx_file, receiver_file=receiver_file) as config:
         with tmp(output_dir / "tmp", allow_dir=True) as tmp_dir:
@@ -2193,6 +2149,7 @@ def ppk(
     quality_conversion = np.sum(results["quality"] == 1) / len(results["quality"]) * 100
     print(f"Quality conversion: Q1 = {quality_conversion:.2f} %")
 
+    results["path"] = out_path
     results["sp3"] = sp3_file if sp3_file and sp3_file.is_file() else None
     results["clk"] = clk_file if clk_file and clk_file.is_file() else None
 

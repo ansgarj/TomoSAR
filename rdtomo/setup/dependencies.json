@@ -84,7 +84,9 @@
 		"Source": "https://github.com/gnudatalanguage/gdl",
 		"Used_by": {
 			"module": [
-				"rdtomo.manager.gdl()"
+				"rdtomo.manager.gdl()",
+				"rdtomo.data.DroneData.imuconv()",
+				"rdtomo.ProcessingDir.init()"
 			],
 			"tools": {
 				"rdtomo": ["init", "slice"]
@@ -93,6 +95,19 @@
 	},
 	"unimoco": {
 		"Usage": "Integrating IMU and GNSS (Kahlman filter)",
+		"Source": "Radaz",
+		"Used_by": {
+			"module": [
+				"rdtomo.ProcessingDir.init()",
+				"rdtomo.data.DroneData.unimoco()"
+			],
+			"tools": {
+				"rdtomo": ["init"]
+			}
+		}
+	},
+	"taskmon": {
+		"Usage": "Populating processing subfolders",
 		"Source": "Radaz",
 		"Used_by": {
 			"module": [

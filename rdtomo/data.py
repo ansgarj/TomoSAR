@@ -10,14 +10,17 @@ import shutil
 from matplotlib import pyplot as plt
 from os import cpu_count
 from abc import ABC
+import subprocess
+from time import sleep
 
-from .utils import warn, extract_datetime, drop_into_terminal, local, srf
+from .utils import warn, extract_datetime, drop_into_terminal, local, srf_reader, srf_writer, gpst_to_dt, parse_datetime_string, ascii_reader, infer_rf
 from .manager import tmp, read_only, DirExistsError, DirNotFoundError, gdl, run
-from .gnss import reachz2rnx, fetch_swepos, extract_rnx_info, station_ppp, ppk, ubx2rnx, splice_sp3, splice_clk, splice_inx, chc2rnx, reach2rnx, generate_mocoref
+from .gnss import reachz2rnx, fetch_swepos, extract_rnx_info, station_ppp, ppk, ubx2rnx, splice_sp3, splice_clk, splice_inx, chc2rnx, reach2rnx, generate_mocoref, read_rnx2rtkp_out
 from .core import TomoScene, TomoScenes, Scenes, tomoinfo
 from .apperture import SARModel
-from .position import Pos
+from .position import Pos, ReferenceFrame
 from .trackfinding import trackfinder
+from .config import Settings
 
 # Abstract class that dispatches to DataDir, ProcessingDir, TomoDir or TomoArchive
 class LoadDir(Path, ABC):
@@ -104,6 +107,9 @@ class LoadDir(Path, ABC):
     def glob(self, pattern: str, case_sensitive: bool|None = None, recurse_symlinks: bool = False) -> Iterator[Path]:
         return Path(self).glob(pattern=pattern, case_sensitive=case_sensitive, recurse_symlinks=recurse_symlinks)
     
+    def rglob(self, pattern, *, case_sensitive = None):
+        return Path(self).rglob(pattern, case_sensitive=case_sensitive)
+    
 @dataclass(slots=True)
 class DroneData():
     container: Path|None = None
@@ -186,8 +192,12 @@ class DroneData():
             nav_files.append(self.drone_rnx_nav)
         return nav_files
 
-    def init(self, processing_dir: Path|str, generate: bool = True) -> ProcessingDir:
-        processing_dir = ProcessingDir(processing_dir, date=self.timestamp.strftime('%Y%m%d'), generate=generate)
+    def init(self, processing_dir: Path|str, exist_ok: bool = True) -> ProcessingDir:
+        processing_dir = Path(processing_dir)
+        if not processing_dir.exists():
+            processing_dir.mkdir(parents=True)
+
+        processing_dir = ProcessingDir(processing_dir, date=self.timestamp.strftime('%Y%m%d'), exist_ok=exist_ok)
 
         # Initiate copy
         processing_dir.data = self.copy()
@@ -202,10 +212,12 @@ class DroneData():
                 target_dir = processing_dir.ground_dir
 
             # Copy and update path
+            if file is None:
+                continue
             if file == target_dir / file.name:
                 continue
-            processing_dir.data[key] = shutil.copy2(file, target_dir)
-        
+            processing_dir.data[key] = Path(shutil.copy2(file, target_dir))
+          
         return processing_dir
     
     def ppk(self,
@@ -247,6 +259,15 @@ class DroneData():
             - "clk": .CLK Path or None
             - "path": .pos Path or None"""
         
+        # Check if target .pos file exists
+        target_file = self.drone_gnss_bin.with_suffix(f".pos")
+        if target_file.is_file():
+            print(f"Target .pos file located: {target_file}")
+            print("--> Will not run PPK")
+            pos, results = read_rnx2rtkp_out(target_file)
+            results["path"] = target_file
+            return pos, results
+        
         # Ensure sufficient overlap in data
         if isinstance(minimal_overlap, float):
             minimal_overlap = timedelta(minutes=minimal_overlap)
@@ -261,7 +282,6 @@ class DroneData():
             out_path = self.drone_rnx_obs.with_suffix(".pos")
             download_dir = self.base_obs.resolve().parent
 
-        print(f"base_pos: {self.base_pos} of type {type(self.base_pos)}")
         # Run PPK
         return ppk(
             rover_obs=self.drone_rnx_obs,
@@ -288,29 +308,195 @@ class DroneData():
 
     def imuconv(self) -> Path:
         """Returns the imu_logger_dat-[...]_ts+00_il_ie_ad.bin file for unimoco. Runs GDL>imuconv
-        on the IMU binary log, if necessary, in order to produce it."""
+        on the IMU binary log and GDL>imuie2ad, if necessary, in order to produce it."""
 
-        target_file = self.drone_imu_bin.resolve().parent / (self.drone_imu_bin.stem + "_ts+00_il_ie_ad.bin")
+        target_file = self.drone_imu_bin.resolve().parent / (self.drone_imu_bin.stem + "_ts+00_il_ie.bin")
         if not target_file.is_file():
-            gdl(["imuconv", self.drone_imu_bin])
-        return target_file
+            print("Converting IMU data ...", end=" ", flush=True)
+            gdl(["imuconv", self.drone_imu_bin], capture=True)
+            print("done.", flush=True)
+        else:
+            print(f"Found file: {target_file}")
+            print("--> Will not convert IMU data.")
 
-    def unimoco(self, pos_file: str|Path) -> Path:
-        """Returns the radar_logger_dat-[...].mocob file produed by unimoco. Runs unimoco first,
-        if necessary, in order to produce it."""
+        final_file = self.drone_imu_bin.resolve().parent / (self.drone_imu_bin.stem + "_ts+00_il_ie_ad.bin")
+        if not final_file.is_file():
+            print("Integrating converted IMU data ...", end=" ", flush=True)
+            gdl(["imuie2ad", target_file], capture=True)
+            print("done.", flush=True)
+        else:
+            print(f"Found file: {final_file}")
+            print("--> Will not integrate converted IMU data.")
 
-        target_file = self.drone_radar_bin.with_suffix(".mocob")
-        if not target_file.is_file():
-            run(["unimoco",
-                self.config_gps_imu,
-                self.imuconv(),
-                pos_file,
-                "-saveIntermediate",
-                "1",
-                ">>",
-                self.drone_imu_bin.with_suffix(".tmp")
-            ], capture=False)
-        return target_file
+        return final_file
+
+    def unimoco(self, pos_file: str|Path, config_file: str|Path, out_path: str|Path) -> Path:
+        """Returns the unimoco data. Runs unimoco first, if necessary,
+        in order to produce it."""
+
+        out_path = Path(out_path)
+
+        # Target reference frame
+        tf = ReferenceFrame(Settings().TARGET_FRAME)
+
+        # Check if out_path exists
+        if out_path.is_file():
+            print(f"Found file: {out_path}")
+            print("--> Will not run unimoco.", flush=True)
+            data, rf = srf_reader(out_path)
+            if tf != rf:
+                print(f"Reference frame inferred from {out_path} ({rf}) does not match target frame ({tf}).")
+                print(f"--> Converting ...", end=" ", flush=True)
+                rf = ReferenceFrame(rf)
+
+                # Get date and timestamp
+                match = re.search(r'(\d{4}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2})', out_path.name)
+                if match:
+                    dt = parse_datetime_string(match.group(1), require_datetime=True)
+                else:
+                    raise RuntimeError(f"The file path does not contain a timestamp string: {out_path}")
+                
+                # Reframe
+                dt = gpst_to_dt(data[:,0], reference_date=dt)
+                data[:,1:4] = rf.as_frame(tf, *rf.geo_to_ecef(*data[:,1:4].T), dt)
+                srf_writer(out_path, data, ref_frame=tf)
+        else:
+            target_file = self.drone_imu_bin.resolve().parent / (self.drone_imu_bin.stem + "_ts+00_il_ie_ad.moco")
+            if not target_file.is_file():
+                # Get reference frame from .pos file
+                with open(pos_file, 'r') as f:
+                    for line in f:
+                        if line.startswith("% REF FRAME"):
+                            rf = line.split()[-1]
+                            break
+                        if not line.startswith("%"):
+                            # EOH: no information provided, assume standard RTKP output (ITRF2020)
+                            rf = "ITRF2020"
+                            break
+                if tf != rf:
+                    print(f"Reference frame inferred from {pos_file} ({rf}) does not match target frame ({tf}).")
+                    print(f"--> Converting ...", end=" ", flush=True)
+                    read_rnx2rtkp_out(Path(pos_file))
+                    print("done.", flush=True)
+
+                # Parameters
+                para_file = target_file.with_name("unimoco_parameters.txt")
+                # Default values
+                q = 1
+                mode = 1
+                si = 0
+                ti = 0
+                tf = 0
+                if para_file.is_file():
+                    with open(para_file, 'r') as f:
+                        flag = False
+                        for line in f:
+                            if not flag:
+                                if line.startswith("[unimoco]"):
+                                    flag = True
+                            if line.startswith("Qscale"):
+                                _, _, q = line.partition("=")
+                                q = int(q.strip())
+                            if line.startswith("mode"):
+                                _, _, mode = line.partition("=")
+                                mode = int(mode.strip())
+                            if line.startswith("saveIntermediate"):
+                                _, _, si = line.parition("=")
+                                si = int(si.strip())
+                            if line.startswith("ti"):
+                                _, _, ti = line.partition("=")
+                                try:
+                                    ti = float(ti.strip())
+                                except ValueError:
+                                    pass
+                            if line.startswith("tf"):
+                                _, _, tf = line.partition("=")
+                                try:
+                                    tf = float(tf.strip())
+                                except ValueError:
+                                    pass
+                    
+                print("Running unimoco ...", flush=True)
+                run(["unimoco",
+                    config_file,
+                    self.imuconv(),
+                    pos_file,
+                    "-ti",
+                    str(ti),
+                    "-tf",
+                    str(tf),
+                    "-Qscale",
+                    str(q),
+                    "-mode",
+                    str(mode),
+                    "-saveIntermediate",
+                    str(si),
+                    ">>",
+                    self.drone_imu_bin.with_suffix(".tmp")
+                ], capture=False)
+
+                # Save radaz-style copy
+                shutil.copy2(target_file, self.drone_radar_bin.with_suffix(".moco"))
+
+                # Clean-up
+                for f in Path.cwd().glob("temp_*.moco"):
+                    f.unlink(missing_ok=True)
+
+                # unimoco parameters
+                ti = "default" if ti==0 else ti
+                tf = "default" if tf==0 else tf
+                with open(para_file, "w") as f:
+                    f.write("[unimoco]\n")
+                    f.write("# Qscale options: 1e-4 or 1e-3 or 1e-2 or 1e-1 or 1 (default)\n")
+                    f.write(f"Qscale={q}\n")
+                    f.write("# mode options: 1=fwd/bck (default), 2=fwd, 3,bck\n")
+                    f.write(f"mode={mode}\n")
+                    f.write("# separate options: 1 -> saveIntermediate\n")
+                    f.write(f"saveIntermediate={si}\n")
+                    f.write("# initial and final time:\n")
+                    f.write(f"ti={ti}\n")
+                    f.write(f"tf={tf}\n")
+
+                # Check unimoco quality
+                fig, axs = plt.subplots(2, 1, figsize=(12,12))
+                ax = axs[0]
+                try:
+                    res, _, _ = ascii_reader(self.data.drone_imu_bin.resolve().parent / (self.data.drone_imu_bin.stem + "_ts+00_il_ie_ad.res"))
+                    ax.plot(res[:,0], res[:,1], label="x", lw=".2")
+                    ax.plot(res[:,0], res[:,2], label="y", lw=".2")
+                    ax.plot(res[:,0], res[:,3], label="z", lw=".2")
+                    ax.set_title("innovation")
+                    ax.legend()
+                except FileNotFoundError:
+                    pass
+
+                ax = axs[1]
+                try:
+                    sep, _, _ = ascii_reader(self.data.drone_imu_bin.resolve().parent / (self.data.drone_imu_bin.stem + "_ts+00_il_ie_ad.sep"))
+                    ax.plot(sep[:,0], sep[:,1], label="North", lw=".2")
+                    ax.plot(sep[:,0], sep[:,2], label="East", lw=".2")
+                    ax.plot(sep[:,0], sep[:,3], label="Up", lw=".2")
+                    ax.set_title("filter separation")
+                    ax.legend()
+                except FileNotFoundError:
+                    pass
+
+                fig.savefig(self.moco_file.with_suffix(".png"))
+
+            else:
+                print(f"Found file: {target_file}")
+                print("--> Will not run unimoco.", flush=True)
+
+            print("Converting moco file to binary format ...", end=" ", flush=True)
+            data, _, _ = ascii_reader(target_file)
+            data = data[:,:10]
+            srf_writer(out_path, data, ref_frame=tf.name)
+
+            # Radaz-style copy
+            shutil.copy2(out_path, self.drone_radar_bin.with_suffix(".mocob"))
+            print("done.")
+
+        return data
 
     def overlap(self) -> timedelta:
         return min(self.base_end, self.drone_end) - max(self.base_start, self.drone_start)
@@ -319,7 +505,29 @@ class DroneData():
         """Returns a timestamp in the middle of the base_start and base_end
         as a nominal epoch."""
         return self.base_start + (self.base_end - self.base_start)/2
-    
+
+    def getmac(self) -> str:
+        """Returns radar serial number from the radar log."""
+        with open(self.drone_radar_log, 'r') as log:
+            for line in log:
+                if line.startswith("ID"):
+                    sn = line.split()[1][-4:]
+                    if int(sn[0]) == 0:
+                        sn = sn[1:]
+                    return sn
+        return ''
+
+    def cmdver(self) -> str:
+        """Returns the radar cmd version from the radar log."""
+        with open(self.drone_radar_log, 'r') as log:
+            for line in log:
+                if line.startswith("Radar CMD file"):
+                    cmdver = line.split()[-1]
+                    match = re.search(r'(\d+(?:_\d+)*)', cmdver)
+                    if match:
+                        return match.group(1)
+        return ''
+
     def drone_rnx_files(self) -> bool:
         if not all((self.drone_rnx_obs, self.drone_rnx_nav, self.drone_rnx_sbs)):
             if not self.drone_gnss_bin:
@@ -328,7 +536,7 @@ class DroneData():
         return True
             
     def _valid_path(self, path: Any) -> bool:
-        return path is None or isinstance(path, Path)
+        return path is None or isinstance(Path(path), Path)
 
     def keys(self) -> KeysView[str]:
         return self.files.keys()
@@ -391,6 +599,13 @@ class DroneData():
             raise ValueError
         return (key in self.files and bool(self.files[key])) or (key in self.paths())
 
+    def __bool__(self) -> bool:
+        """Returns False if all paths are None, otherwise True."""
+        for path in self:
+            if path is not None:
+                return True
+        return False
+    
 class DataDir(LoadDir):
     def __new__(cls, *args, **kwargs) -> DataDir:
         return super().__new__(cls, *args, data=True, **kwargs)
@@ -806,6 +1021,8 @@ class DataDir(LoadDir):
             print()
             yield data
 
+        data.container = None
+
     def init(
             self,
             processing_dir: str|Path,
@@ -829,7 +1046,7 @@ class DataDir(LoadDir):
             elevation_mask: float|None = None,
             minimal_overlap: timedelta|float = timedelta(minutes=10),
             dry: bool = False,
-            rtkp_config: str|Path|None = None,
+            ppk_config: str|Path|None = None,
     ) -> ProcessingDir:
         with self.open(
             require_drone=True,
@@ -857,11 +1074,11 @@ class DataDir(LoadDir):
                 print("All files located, setting up temporary processing directory ...", end="\n\n")
                 with tmp(tmp_data.container.parent / "processing.tmp") as tmp_dir:
                     processing_dir = tmp_data.init(tmp_dir)
-                    processing_dir.init(atx=atx, config=rtkp_config, receiver=receiver, elevation_mask=elevation_mask, minimal_overlap=minimal_overlap, download_attempts=download_attempts, max_downloads=max_downloads)
+                    processing_dir.init(atx=atx, config=ppk_config, receiver=receiver, elevation_mask=elevation_mask, minimal_overlap=minimal_overlap, download_attempts=download_attempts, max_downloads=max_downloads)
             else:
                 print("All files located, dropping you into the processing directory ... ", end="\n\n")
                 drop_into_terminal(processing_dir)
-            return tmp_data.init(processing_dir)
+            return tmp_data.init(processing_dir, exist_ok=False)
 
     @property
     def content(self) -> list[Path]:
@@ -897,48 +1114,61 @@ class ProcessingDir(LoadDir):
     processing: Path
     cross: Path
     data: DroneData
+    _moco_file: Path|None
 
     # Set of attributes that cannot be changed
     immutable = {"date", "rawdata", "radar_dir", "ground_dir", "mocoref_dir", "para_dir", "m8t_5hz", "config_gps_imu",
                  "process_config", "config_para", "srtm_para", "cband_vv_para", "lband_hh_para", "lband_hv_para",
                  "pband_hh_para", "cband_inf_para", "pband_inf_para", "lband_vv_para", "lband_vh_para", "pband_hv_para",
-                 "pband_vv_para", "pband_vh_para", "processing", "cross"}
+                 "pband_vv_para", "pband_vh_para", "processing", "cross", "_moco_file"}
     
     def __new__(cls, *args, **kwargs) -> ProcessingDir:
         return super().__new__(cls, *args, processing=True, **kwargs)
     
-    def __init__(self, *args, generate: bool = True, date: str|datetime|datetype|None = None, exist_ok: bool = False) -> None:
+    def __init__(self, *args, date: str|datetime|datetype|None = None, exist_ok: bool = True, **kwargs) -> None:
         super().__init__(*args)
+        path = Path(*args)
 
         # Initiate rawdata directory
         if hasattr(self, '_initialized') and self._initialized:
-            if not generate or not date:
-                if not (self / "rawdata").exists():
-                    raise DirNotFoundError(f"{self} does not contain a rawdata folder")
+            # Convert provided date to string
+            if isinstance(date, (datetime, datetype)):
+                date = date.strftime("%Y%m%d")
+            
+            # Check if rawdata folder exists and contains date folder
+            if (path / "rawdata").exists():
                 content = [d for d in (self / "rawdata").glob("[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]") if d.is_dir()]
                 if len(content) == 1:
                     object.__setattr__(self, "rawdata", content[0])
                     object.__setattr__(self, "date", self.rawdata.name)
+                    if date and date != self.date:
+                        warn(f"Provided date {date} does not match content of rawdata directory {self.rawdata}. Ignoring provided date.")
                 elif content:
-                    raise DirNotFoundError(f"Multiple date subfolders of the rawdata directory found: {content}. Specify a date (date=).")
+                    raise DirNotFoundError(f"Multiple date subfolders of the rawdata directory found: {content}. Only one is allowed.")
+                elif date:
+                    object.__setattr__(self, "date", date)
+                    object.__setattr__(self, "rawdata", path / "rawdata" / date)
+                    self.rawdata.mkdir()
                 else:
-                    raise ValueError(f"No date subfolder of the rawdata diectory found, specify a date (date=){' and set generate=True' if not generate else ''}.")
-            else:
-                if isinstance(date, (datetime, datetype)):
-                    date = date.strftime("%Y%m%d")        
+                    raise ValueError(f"No date subfolder of the rawdata diectory found, specify a date (date=).")
+            elif date:
                 object.__setattr__(self, "date", date)
-                object.__setattr__(self, "rawdata", self / "rawdata" / date)
+                object.__setattr__(self, "rawdata", path / "rawdata" / date)
+                self.rawdata.mkdir(parents=True)
+            else:
+                raise ValueError(f"No date specified (date=), and date directory does not exist.")
+                
             # Initiate rawdata subfolders
             object.__setattr__(self, "radar_dir", self.rawdata / "radar1")
             object.__setattr__(self, "ground_dir", self.rawdata / "ground1")
             object.__setattr__(self, "mocoref_dir", self.rawdata / "mocoref")
-            if generate:
-                self.radar_dir.mkdir(exist_ok=exist_ok, parents=True)
-                self.ground_dir.mkdir(exist_ok=exist_ok)
-                self.mocoref_dir.mkdir(exist_ok=exist_ok)
+            self.radar_dir.mkdir(exist_ok=True)
+            self.ground_dir.mkdir(exist_ok=True)
+            self.mocoref_dir.mkdir(exist_ok=True)
+            object.__setattr__(self,"_moco_file", None)
             
             # Initiate parameter directory
-            object.__setattr__(self, "para_dir", self / "parameter")
+            object.__setattr__(self, "para_dir", path / "parameter")
             object.__setattr__(self, "m8t_5hz", self.para_dir / "config" / "m8t_5hz.conf")
             object.__setattr__(self, "config_gps_imu", self.para_dir / "config" / "config_gps_imu.txt")
             object.__setattr__(self, "process_config", self.para_dir / "config" / "process.config")
@@ -981,7 +1211,38 @@ class ProcessingDir(LoadDir):
                 if file and not file.resolve().parent == target_dir.resolve():
                     raise RuntimeError(f"The file {local(file, self)} was not located inside the correct folder: {local(target_dir, self)}")
             self.data = data
+        
+    def gather(self) -> None:
+        """Gathers data and fetches Radaz parameter files."""
+        
+        # Gather data
+        if not self.data:
+            self.open()
 
+        # Check if parameters file already exist
+        if (self / "parameter" / '1' / 'cband_vv.para').is_file():
+            return
+        if (self / "parameter" / '1' / 'cband_hh.para').is_file():
+            return
+
+        # Locate template
+        paraname = '*_' + self.data.getmac() + '_' + self.data.cmdver()
+        parameter_folders = [p for p in (Settings().RADAZ_CONFIG / "parameterfiles").glob(paraname)]
+        if len(parameter_folders) == 1:
+            shutil.copytree(parameter_folders[0], self, dirs_exist_ok=True)
+        elif len(parameter_folders) > 1:
+            raise DirExistsError(f"Multiple ({len(parameter_folders)}) parameter folders found: {parameter_folders}")
+        else:
+            raise DirNotFoundError(f"No parameter folder found matching: {paraname}")   
+
+    @property
+    def moco_file(self) -> Path:
+        if self._moco_file is None:
+            self.gather()
+            (self.rawdata / "moco").mkdir(exist_ok=True)
+            object.__setattr__(self,"_moco", self.rawdata / "moco" / (self.data.drone_imu_bin.stem + "_ts+00_il_ie_ad.moco"))
+        return self._moco
+            
     def init(
             self,
             config: str|Path|None = None,
@@ -994,8 +1255,8 @@ class ProcessingDir(LoadDir):
             minimal_overlap: timedelta|float = timedelta(minutes=10)
         ) -> None:
 
-        # Gather data
-        self.open()
+        # Gather data and ensure parameter files are present
+        self.gather()
 
         # Run PPK
         coords, results = self.data.ppk(
@@ -1018,22 +1279,48 @@ class ProcessingDir(LoadDir):
         ax.plot(gpst[q!=1], coords.h[q!=1], 'r+')
         ax.set_xlabel("GPST (s)")
         ax.set_ylabel("Ellipsoidal Height (m)")
+        ax.set_title(coords.frame.name)
         ax = axs[1]
         ax.plot(coords.easting[q==1], coords.northing[q==1], 'g')
         ax.plot(coords.easting[q!=1], coords.northing[q!=1], 'r+')
         ax.set_xlabel("Easting (m)")
         ax.set_ylabel("Northing (m)")
-        ax.set_title(coords.frame.name)
-        fig_name = self.data.timestamp.strftime("%Y-%m-%d-%H-%M-%S-position.svg")
-        fig.savefig(self.radar_dir / fig_name, format="svg")
-
-        plt.show()
+        fig_name = self.data.timestamp.strftime("%Y-%m-%d-%H-%M-%S-gnss-position.png")
+        fig.savefig(self.radar_dir / fig_name, format="png")
 
         # Run unimoco on position output
-        moco_file = self.data.unimoco(results['path'])
+        self.data.unimoco(results['path'], self.config_gps_imu, self.moco_file)
 
         # Trackfinding
-        trackfinder(moco_file)
+        track_files = [f for f in self.moco_file.parent.glob("*_track.npz")]
+        if track_files:
+            print(f"Found {len(track_files)} track files (*_track.npz).")
+            print("--> Will not run trackfinder")
+        else:
+            trackfinder(self.moco_file)
+
+        # Finishing touches using GDL procedures
+        (self / "mocos.done").touch()
+
+        print("Setting things up:", end=" ", flush=True)
+        gdl("construct,/para",capture=True)
+        sleep(0.5)
+        for i in self.track_list:
+            for j in self.band_list:
+                exec = self.band(i,j) / "execute"
+                if not exec.exists():
+                    gdl([f"proc,{j}"], capture=True)
+                    print("*", end="", flush=True)
+        print(" done.")
+    
+        print("Starting taskmon ...", flush=True)
+        subprocess.run(
+            ["bash",shutil.which('taskmon'), "&"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True
+        )
 
         # Syntax for populating folders?
         # {GDL>construct}
@@ -1041,10 +1328,45 @@ class ProcessingDir(LoadDir):
         # taskmon should finish (or ./execute inside each folder)
         # both run {GDL>image1} and {GDL>cleaner,1}
 
+    @property
+    def track_count(self) -> int|None:
+        return len(list(self.cross.iterdir())) if self.cross.is_dir() else None
 
     @property
-    def track_count(self) -> int:
-        return len(list(self.cross.iterdir())) if self.cross.is_dir() else None
+    def track_list(self) -> list[int]|None:
+        if self.track_count:
+            return list(range(1,self.track_count+1))
+        return None
+
+    @property
+    def tracks(self) -> list[Path]|None:
+        return list(self.cross.iterdir()) if self.cross.is_dir() else None
+
+    @property
+    def band_count(self) -> int|None:
+        first_track = self.cross / "01"
+        return len(list(first_track.iterdir())) if first_track.is_dir() else None
+
+    @property
+    def band_list(self) -> list[int]|None:
+        if self.band_count:
+            return list(range(1,self.band_count+1))
+        return None
+
+    def band(self, track: int, band: int) -> Path:
+        return self.cross / f"{track:02d}" / str(band)
+
+    def bands(self) -> dict[int,dict[int, Path]]|None:
+        if self.track_count and self.band_count:
+            d = {}
+            for i in range(1,self.track_count+1):
+                t = f"{i:02d}"
+                d[i] = {}
+                for j in range(1,self.band_count+1):
+                    b = f"{j}"
+                    d[i][j] = self.cross / t / b
+            return d
+        return None
     
     @property
     def preprocessing_done(self) -> bool:

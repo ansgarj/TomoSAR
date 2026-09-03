@@ -149,8 +149,151 @@ def warn(message) -> None:
 
     print(f"{YELLOW}{filename}:{lineno} in {caller_func}(): {message}{RESET}", file=sys.stderr)
 
+# Infer Reference frame from string lines
+def infer_rf(lines: list[str], new_rf: None|str = None) -> str:
+    """Infers reference frame from a list of lines. These lines are assumed to
+    be from an ASCII header, and the reference frame line is supposed to have the
+    shape:
+    
+    % REF FRAME :   <RF>\\n
+    
+    If new_rf is not None, then infer_rf will update lines to match the reference
+    frame.
+    
+    Returns:
+        - Inferred reference frame (string)
+        - lines object with new reference frame"""
+
+    for i, line in enumerate(lines):
+        if line.startswith("% REF FRAME"): 
+            inferred_rf = line.split()[-1]          
+            if new_rf is not None:
+                lines[i] = f"% REF FRAME :   {new_rf}\n"
+            return inferred_rf, lines
+
+    if new_rf is not None:
+        lines = [f"% REF FRAME :   {new_rf}\n"] + lines
+
+    return None, lines
+
+# ASCII tabular data reader to avoid pandas errors when misaligned
+def ascii_reader(input: str|Path, content: bool = False) -> tuple[np.ndarray, list[str], list[str]]:
+    """Reads tabular ASCII data and returns as a single array. The
+    header (lines starting with %) is stored separately and returned as
+    a list of lines. Also infers the format of numeric data and return as a
+    list of strings. Set content=True if passing the content of the ASCII
+    file as a string directly.
+
+    Returns:
+        - Tabular data (numeric)
+        - Header lines
+        - Format of numeric data
+    """
+    def infer_formats(data_lines: list[str]) -> list[str]:
+        rows = [line.split() for line in data_lines]
+        n_cols = len(rows[0])
+        formats = []
+        for col in range(n_cols):
+            col_toks = [row[col] for row in rows]
+            decimals = max((len(t.split(".")[1]) if "." in t else 0) for t in col_toks)
+            width = max(len(t) for t in col_toks) + 1  # +1 margin for sign changes etc.
+            if any(("e" in t or "E" in t) for t in col_toks):
+                formats.append(f"%{width}.{decimals}e")
+            elif decimals:
+                formats.append(f"%{width}.{decimals}f")
+            else:
+                formats.append(f"%{width}d")
+        return formats
+
+    if content:
+        lines = input
+    with open(input, 'r') as f:
+        lines = f.readlines()
+
+    # Header
+    header_lines = []
+    rf = None
+    for i in range(len(lines)):
+        line = lines[i]
+        if line.startswith('%'):
+            header_lines.append(line)
+        else:
+            break
+
+    # Data
+    data_lines = lines[i:]
+    fmt = infer_formats(data_lines)
+    try:
+        data = [list(map(float, line.split())) for line in data_lines]
+        data = np.array(data)
+    except ValueError:
+        raise ValueError(f"Could not parse numeric data from {input}")
+
+    return data, header_lines, fmt
+
+def ascii_writer(path: str|Path,
+                 data: np.ndarray,
+                 header_lines: list[str] = [],
+                 format: list[str] = [],
+                 label_spans: dict[str, int] | None = None):
+    """Writes numeric data as an ASCII tabular file. Header lines can be passed separately,
+    as well as the format for the numeric data as a list of string (matching the columns).
+    The last line of the header (if any) is assumed to contain labels, and the label_spans
+    parameter can be used to cause any label to span multiple columns (labels not listed
+    default to span 1)."""
+
+    def align_header_to_fmt(header_line: str, fmt: list[str], label_spans: dict[str, int] | None = None) -> str:
+        """Re-pad a header line's labels to match the field widths used by np.savetxt's fmt list.
+
+        label_spans: optional {label: n_columns} for labels that cover more than one
+        data column (e.g. "GPST" spanning gps_week + tow). Labels not listed default to span 1.
+        """
+        label_spans = label_spans or {}
+        labels = header_line.lstrip('%').split()
+        widths = [int(re.match(r'%(\d+)', f).group(1)) for f in fmt]
+
+        spans = [label_spans.get(lbl, 1) for lbl in labels]
+        if sum(spans) != len(widths):
+            # Spans don't account for every data column - can't safely realign
+            return header_line
+
+        aligned_parts = []
+        idx = 0
+        for lbl, span in zip(labels, spans):
+            # Sum the widths of the columns this label covers, plus one space
+            # per internal join (since those columns are also space-joined by savetxt)
+            w = sum(widths[idx:idx + span]) + (span - 1)
+            # Remove one space from first entry (to account for %)
+            if not aligned_parts:
+                w -= 1
+            aligned_parts.append(f"{lbl:>{w}}")
+            idx += span
+
+        aligned = " ".join(aligned_parts)
+        return f"%{aligned}\n"
+
+    with open(path, "w") as f:
+        for line in header_lines[:-1]:
+            f.write(line)
+        f.write(align_header_to_fmt(header_lines[-1], format, label_spans))
+
+        np.savetxt(f, data, fmt=format)
+
 # SRF file reader
-def srf(path: str|Path) -> np.ndarray:
+def srf_reader(path: str|Path) -> tuple[np.ndarray, None|str]:
+    """Reads the Sun Raster (binary) File (SRF), parsing the header, and returns
+    the numeric data stored as an array. Reads the 7th header element (cmap) as
+    determining a reference frame:
+        - 0: None
+        - 1: 'ITRF2020'
+        - 2: 'ETRF2020'
+        - 3: 'SWEREF99'
+        - 4: 'EUREF89'
+        - 5: 'EUREF-FIN'
+        - 6: 'EUREF-DK94'
+        - 7: 'LKS94'
+        - 8: 'LKS92'
+        - 9: 'EUREF-EST97'"""
     
     with open(path, "rb") as f:
         header = np.fromfile(f, dtype=np.int32, count=8)
@@ -162,8 +305,21 @@ def srf(path: str|Path) -> np.ndarray:
     pixel_bits = header[3]
     byte_length = header[4]
     data_type = header[5]
-    # cmap = header[6]
+    ref_frame = header[6]           # Traditionally cmap
     # cmap_length = header[7]
+
+    rf_map = {
+        0: None,
+        1: 'ITRF2020',
+        2: 'ETRF2020',
+        3: 'SWEREF99',
+        4: 'EUREF89',
+        5: 'EUREF-FIN',
+        6: 'EUREF-DK94',
+        7: 'LKS94',
+        8: 'LKS92',
+        9: 'EUREF-EST97'
+    }
 
     # Check magic number
     if magic_number != 1504078485: # 0x59a66a95
@@ -205,7 +361,83 @@ def srf(path: str|Path) -> np.ndarray:
         raise RuntimeError(f"SRF file {path} pixel bits did not match raster type: {dtype}")
     
     # Read array
-    return np.memmap(path, dtype=dtype, mode="r", offset=32, shape=(height, width, depth)).squeeze()
+    return np.memmap(path, dtype=dtype, mode="r", offset=32, shape=(height, width, depth)).squeeze(), rf_map[ref_frame]
+
+# SRF file writer
+def srf_writer(path: str | Path, arr: np.ndarray, ref_frame: str) -> None:
+    """Stores numeric array data as a Sun Raster (binary) File (SRF). Allows
+    reference frame information to be stored in the header in place of cmap,
+    for reading with srf_reader() function. If the string fails to associate with a
+    numeric value according to the map below, 0 is used as a fallback:
+        - 1: 'ITRF2020'
+        - 2: 'ETRF2020'
+        - 3: 'SWEREF99'
+        - 4: 'EUREF89'
+        - 5: 'EUREF-FIN'
+        - 6: 'EUREF-DK94'
+        - 7: 'LKS94'
+        - 8: 'LKS92'
+        - 9: 'EUREF-EST97'"""
+    
+    arr = np.asarray(arr)
+
+    # Ensure 3D layout: (height, width, depth)
+    if arr.ndim == 2:
+        arr = arr[..., np.newaxis]
+    elif arr.ndim != 3:
+        raise ValueError("Array must be 2D or 3D")
+
+    height, width, depth = arr.shape
+
+    # SRF type mapping
+    dtype_map = {
+        np.dtype("int16"): (10, 16),
+        np.dtype("int32"): (11, 32),
+        np.dtype("int64"): (12, 64),
+        np.dtype("float32"): (20, 32),
+        np.dtype("float64"): (21, 64),
+        np.dtype("complex64"): (30, 64),
+        np.dtype("complex128"): (31, 128),
+    }
+
+    try:
+        data_type, bits_per_sample = dtype_map[arr.dtype]
+    except KeyError:
+        raise ValueError(f"Unsupported dtype: {arr.dtype}")
+
+    pixel_bits = depth * bits_per_sample
+    byte_length = arr.nbytes
+
+    rf_map = {
+        'ITRF2020': 1,
+        'ETRF2020': 2,
+        'SWEREF99': 3,
+        'EUREF89': 4,
+        'EUREF-FIN': 5,
+        'EUREF-DK94': 6,
+        'LKS94': 7,
+        'LKS92': 8,
+        'EUREF-EST97': 9
+    }
+    rf = rf_map[ref_frame] if ref_frame in rf_map else 0
+
+    header = np.array(
+        [
+            1504078485,  # magic number (0x59a66a95)
+            width,
+            height,
+            pixel_bits,
+            byte_length,
+            data_type,
+            rf, 
+            0,  # cmap_length
+        ],
+        dtype=np.int32,
+    )
+
+    with open(path, "wb") as f:
+        header.tofile(f)
+        arr.tofile(f)
 
 # Localize a path(s) if possible
 def local(paths: list[Path|str]|Path|str, root: Path|str = '.') -> list[str] | str:
@@ -219,7 +451,7 @@ def local(paths: list[Path|str]|Path|str, root: Path|str = '.') -> list[str] | s
         except:
             return str(path)
     root = Path(root).resolve()
-    if not isinstance(paths, list):
+    if not isinstance(paths, (list, tuple)):
         return localize(paths, root)
     return [localize(p, root) for p in paths]
 
@@ -1078,7 +1310,9 @@ LEAP_SECONDS = np.array([
 def _to_np_datetime64(obj: object) -> npt.NDArray[np.datetime64]:
     """Convert input to np.datetime64 array."""
     if isinstance(obj, (datetime, date)):
-        return np.array([np.datetime64(obj.astimezone(timezone.utc).replace(tzinfo=None))])
+        if hasattr(obj, 'tzinfo'):
+            return np.array([np.datetime64(obj.astimezone(timezone.utc).replace(tzinfo=None))])
+        return np.array([np.datetime64(obj)])
     elif isinstance(obj, np.datetime64):
         return np.array([obj])
     elif isinstance(obj, (list, tuple, np.ndarray)):

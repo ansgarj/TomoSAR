@@ -238,6 +238,22 @@ class Settings:
         if not isinstance(value, str):
             raise ValueError("The MOCOREF_ANTENNA setting takes a string as value")
         self.data["MOCOREF_ANTENNA"] = value
+
+    @property
+    def RADAZ_CONFIG(self) -> Path:
+        path = self.data.get("RADAZ_CONFIG", None)
+        if path is None:
+            return None
+        return Path(path)
+
+    @RADAZ_CONFIG.setter
+    def RAADZ_CONFIG(self, value: str|Path):
+        if not isinstance(value, (str, Path)):
+            raise ValueError("The RADAZ_CONFIG settings take a path-like string as value")
+        path = Path(value)
+        if not path.is_file():
+            raise FileNotFoundError(f"The file {value} does not exist")
+        self.data["RADAZ_CONFIG"] = str(path.resolve())
     
     @property
     def PPK_CONFIG(self) -> Path:
@@ -520,6 +536,7 @@ DEFAULT = {
         "MOCOREF": "SWEREF99",
         "TARGET": "SWEREF99"
     },
+    "RADAZ_CONFIG": "/opt/os/home/proc/",
     "PPK_CONFIG": internal_file("PPK_CONFIG"),
     "DATA_DIRS": str(Path.home() / "Radar" / "Data"),
     "PROCESSING_DIRS": str(Path.home() / "Radar" / "Processing"),
