@@ -7,7 +7,8 @@ All notable changes to this project will be documented in this file.
 ### Added
 - `rdtomo.position` classes `Pos`, `DeltaPos`, `ReferenceFrame` that functions as a simplified interface to manage coordinates and Reference Frames (similar to `datetime` classes `datetime`, `timedelta` and `timezone`, but explicitly handling arrays of coordinates).
 - `rdtomo.trackfinding` module now also implements classes used to store and manipulate flights and tracks: `RawFlight`, `Flight(RawFlight)`, `Track(RawFlight, abc.ABC)`, `Spiral(Track)`, `Linear(Track)` and `Irregular(Track)`.
-- `rdtomo.utils.srf()` for reading and `rdtomo.utils.srf_write()` for writing Sun Raster Files (SRF): this is the standard binary raster format used by Radaz.
+- `rdtomo.utils.srf_reader()` for reading and `rdtomo.utils.srf_writer()` for writing Sun Raster Files (SRF): this is the standard binary raster format used by Radaz (not radar).
+- `rdtomo.utils.ascii_reader()` for reading and `rdtomo.utils.ascii_writer()` for writing ascii tabular data files with numeric data and header lines, because pandas does not account for additional header lines and is unreliable when the files sometimes are misaligned (such as those produced by unimoco).
 - `rdtomo.data.DroneData()` class now has methods for PPK, imuconv and unimoco.
 - `rdtomo.Settings.RADAZ_CONFIG` which returns a Path which points to a folder with Radaz configuration files.
 - `rdtomo init` tool is now operational, and can be used on a data directory in order to create a processing directory and start preprocessing, or directly on a processing directory. Preprocessing includes IMU conversion and integration, GNSS PPK processing, IMU and GNSS fusion (`unimoco`), trackfinding and folder creation and population.
